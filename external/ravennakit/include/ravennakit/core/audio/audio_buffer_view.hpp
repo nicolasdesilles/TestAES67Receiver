@@ -1,0 +1,358 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+/*
+ * Project: RAVENNAKIT (RAVENNA / AES67 / ST2110-30 SDK)
+ * Copyright (c) 2024-2025 Sound on Digital
+ *
+ * This file is part of RAVENNAKIT.
+ *
+ * RAVENNAKIT is dual-licensed:
+ *   1) Under the terms of the GNU Affero General Public License as published by
+ *      the Free Software Foundation, either version 3 of the License, or
+ *      (at your option) any later version (the "AGPL License"); and
+ *   2) Under a commercial license from Sound on Digital, for customers who
+ *      cannot (or do not wish to) comply with the AGPL License terms.
+ *
+ * If you obtained this file under the AGPL License, you may redistribute it
+ * and/or modify it under the terms of the AGPL License. See the LICENSE
+ * file in the project root for details.
+ *
+ * For commercial licensing, support, and other inquiries, please visit:
+ *
+ *     https://ravennakit.com
+ *
+ */
+
+#pragma once
+#include "ravennakit/core/assert.hpp"
+
+namespace rav {
+
+/**
+ * A non-owning view of a non-interleaved audio buffer.
+ * @tparam T
+ */
+template<class T>
+class AudioBufferView {
+  public:
+    /**
+     * Constructs an audio buffer view with the given channels, number of channels, and number of frames. The view does
+     * not take ownership or take copies of the data.
+     * @param channels The channels.
+     * @param num_channels The number of channels.
+     * @param num_frames The number of frames.
+     */
+    AudioBufferView(T* const* channels, const size_t num_channels, const size_t num_frames) :
+        channels_(channels), num_channels_(num_channels), num_frames_(num_frames) {}
+
+    /**
+     * Compares two audio buffers for equality. It does this by comparing the actual contents. If both audio buffers are
+     * empty, they are considered equal.
+     * @param lhs Left hand side audio buffer.
+     * @param rhs Right hand side audio buffer.
+     * @return True if the audio buffers are equal, false otherwise.
+     */
+    friend bool operator==(const AudioBufferView& lhs, const AudioBufferView& rhs) {
+        if (lhs.num_channels_ != rhs.num_channels_ || lhs.num_frames_ != rhs.num_frames_) {
+            return false;
+        }
+        for (size_t ch = 0; ch < lhs.num_channels_; ++ch) {
+            if (!std::equal(lhs.channels_[ch], lhs.channels_[ch] + lhs.num_frames_, rhs.channels_[ch])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Compares two audio buffers for inequality. It does this by comparing the actual contents. If both audio buffers
+     * are empty, they are considered equal.
+     * @param lhs Left hand side audio buffer.
+     * @param rhs Right hand side audio buffer.
+     * @return True if the audio buffers are not equal, false otherwise.
+     */
+    friend bool operator!=(const AudioBufferView& lhs, const AudioBufferView& rhs) {
+        return !(lhs == rhs);
+    }
+
+    /**
+     * @returns The number of channels.
+     */
+    [[nodiscard]] size_t num_channels() const {
+        return num_channels_;
+    }
+
+    /**
+     * @returns The number of frames (samples per channel).
+     */
+    [[nodiscard]] size_t num_frames() const {
+        return num_frames_;
+    }
+
+    /**
+     * Accesses the channel at the given index.
+     * Does not perform bounds checking.
+     * @param channel_index The index of the channel to get.
+     * @return A pointer to the beginning of the channel.
+     */
+    const T* operator[](size_t channel_index) const {
+        RAV_ASSERT_DEBUG(channel_index < AudioBufferView<T>::num_channels(), "Channel index out of bounds");
+        return channels_[channel_index];
+    }
+
+    /**
+     * Accesses the channel at the given index
+     * Does not perform bounds checking.
+     * @param channel_index The index of the channel to get.
+     * @return A pointer to the beginning of the channel.
+     */
+    T* operator[](size_t channel_index) {
+        RAV_ASSERT_DEBUG(channel_index < num_channels_, "Channel index out of bounds");
+        return channels_[channel_index];
+    }
+
+    /**
+     * @returns An array of pointers to the beginning of each channel. Might be nullptr if the view is empty.
+     */
+    const T* const* data() const {
+        return channels_;
+    }
+
+    /**
+     * @returns An array of pointers to the beginning of each channel which can be written to. Might be nullptr if the
+     * view is empty.
+     */
+    T* const* data() {
+        return channels_;
+    }
+
+    /**
+     * Sets the value of an individual sample.
+     * This method does no bounds checking.
+     * @param channel_index The index of the channel.
+     * @param frame_index The index of the sample.
+     * @param value The value to set.
+     */
+    void set_sample(size_t channel_index, size_t frame_index, T value) {
+        RAV_ASSERT_DEBUG(channel_index < num_channels_, "Channel index out of bounds");
+        RAV_ASSERT_DEBUG(frame_index < num_frames_, "Frame index out of bounds");
+        channels_[channel_index][frame_index] = value;
+    }
+
+    /**
+     * Clears the buffer by setting all samples to zero.
+     */
+    void clear() const {
+        for (size_t i = 0; i < num_channels_; ++i) {
+            clear_audio_data(channels_[i], channels_[i] + num_frames_);
+        }
+    }
+
+    /**
+     * Clears the buffer by setting all samples to the given value.
+     * @param value The value to fill the buffer with.
+     */
+    void clear(T value) const {
+        if (channels_ == nullptr) {
+            return;
+        }
+        for (size_t i = 0; i < num_channels_; ++i) {
+            std::fill(channels_[i], channels_[i] + num_frames_, value);
+        }
+    }
+
+    /**
+     * Clear a range of samples in a channel, without bounds checking.
+     * @param channel_index The index of the channel.
+     * @param start_sample The index of the first frame to clear.
+     * @param num_samples_to_clear The number of samples to clear.
+     */
+    void clear(const size_t channel_index, const size_t start_sample, const size_t num_samples_to_clear) {
+        RAV_ASSERT_DEBUG(channel_index < num_channels(), "Channel index out of bounds");
+        RAV_ASSERT_DEBUG(start_sample + num_samples_to_clear <= num_frames(), "Sample index out of bounds");
+        clear_audio_data(channels_[channel_index] + start_sample, channels_[channel_index] + start_sample + num_samples_to_clear);
+    }
+
+    /**
+     * Copies data from all channels of src into all channels of this buffer.
+     * Make sure the number of channels and frames match.
+     * @param dst_start_frame The index of the start frame.
+     * @param num_frames_to_copy The number of frames to copy.
+     * @param src The source data to copy from.
+     * @param src_num_channels The number of channels in the source data.
+     * @param src_start_frame The index of the start frame in the source data.
+     */
+    void copy_from(
+        const size_t dst_start_frame, const size_t num_frames_to_copy, const T* const* src, const size_t src_num_channels,
+        const size_t src_start_frame = 0
+    ) {
+        RAV_ASSERT_DEBUG(src_num_channels == num_channels(), "Number of channels mismatch");
+        for (size_t i = 0; i < std::min(src_num_channels, num_channels()); ++i) {
+            copy_from(i, dst_start_frame, num_frames_to_copy, src[i] + src_start_frame);
+        }
+    }
+
+    /**
+     * Copies data from src into this buffer, without bounds checking.
+     * @param dst_channel_index The index of the destination channel.
+     * @param dst_start_sample The index of the start frame in the destination channel.
+     * @param num_samples_to_copy The number of samples to copy.
+     * @param src The source data to copy from.
+     */
+    void copy_from(const size_t dst_channel_index, const size_t dst_start_sample, const size_t num_samples_to_copy, const T* src) {
+        RAV_ASSERT_DEBUG(dst_channel_index < num_channels(), "Channel index out of bounds");
+        RAV_ASSERT_DEBUG(dst_start_sample + num_samples_to_copy <= num_frames(), "Sample index out of bounds");
+
+        if (num_samples_to_copy == 0) {
+            return;
+        }
+
+        std::memcpy(channels_[dst_channel_index] + dst_start_sample, src, num_samples_to_copy * sizeof(T));
+    }
+
+    /**
+     * Copies data from all channels of this buffer into dst.
+     * @param num_frames The number of frames.
+     * @param src_start_frame The index of the start frame in the source data.
+     * @param dst The destination data to copy to.
+     * @param dst_num_channels The number of channels.
+     * @param dst_start_frame The index of the start frame in the destination data.
+     */
+    void copy_to(
+        const size_t src_start_frame, const size_t num_frames, T* const* dst, const size_t dst_num_channels,
+        const size_t dst_start_frame = 0
+    ) {
+        RAV_ASSERT_DEBUG(dst_num_channels == num_channels(), "Number of channels mismatch");
+        for (size_t i = 0; i < std::min(num_channels(), dst_num_channels); ++i) {
+            copy_to(i, src_start_frame, num_frames, dst[i] + dst_start_frame);
+        }
+    }
+
+    /**
+     * Copies data from this buffer into dst.
+     * @param src_channel_index The index of the source channel.
+     * @param src_start_sample The index of the start frame in the source channel.
+     * @param num_samples_to_copy The number of samples to copy.
+     * @param dst The destination data to copy to.
+     */
+    void copy_to(const size_t src_channel_index, const size_t src_start_sample, const size_t num_samples_to_copy, T* dst) {
+        RAV_ASSERT_DEBUG(src_channel_index < num_channels(), "Channel index out of bounds");
+        RAV_ASSERT_DEBUG(src_start_sample + num_samples_to_copy <= num_frames(), "Sample index out of bounds");
+
+        if (num_samples_to_copy == 0) {
+            return;
+        }
+
+        std::memcpy(dst, channels_[src_channel_index] + src_start_sample, num_samples_to_copy * sizeof(T));
+    }
+
+    /**
+     * Adds the samples of another audio buffer view to this audio buffer view.
+     * @param other The other audio buffer view.
+     * @return True if the audio buffer view is valid and the number of channels and frames match, false otherwise.
+     */
+    [[nodiscard]] bool add(const AudioBufferView& other) {
+        static_assert(std::is_floating_point_v<T>, "Not supported for integer types");
+
+        if (num_channels_ != other.num_channels_ || num_frames_ != other.num_frames_) {
+            return false;
+        }
+
+        for (size_t ch = 0; ch < num_channels_; ++ch) {
+            for (size_t frame = 0; frame < num_frames_; ++frame) {
+                channels_[ch][frame] += other.channels_[ch][frame];
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @return True if the audio buffer view is valid, false otherwise. Valid is when the number of channels and frames
+     * are greater than zero and the channels are not nullptr.
+     */
+    [[nodiscard]] bool is_valid() const {
+        return channels_ != nullptr && num_channels_ > 0 && num_frames_ > 0;
+    }
+
+    /**
+     * @return The maximum absolute value of all the samples in the audio buffer.
+     */
+    T find_max_abs() const {
+        std::remove_const_t<T> max_value = channels_[0][0];
+        for (size_t ch = 0; ch < num_channels_; ++ch) {
+            for (size_t frame = 0; frame < num_frames_; ++frame) {
+                max_value = std::max(max_value, std::fabs(channels_[ch][frame]));
+            }
+        }
+        return max_value;
+    }
+
+    /**
+     * @channel_index The index of the channel to find the maximum value for.
+     * @return The maximum absolute value of all the samples in the audio buffer.
+     */
+    T find_max_abs(const size_t channel_index) const {
+        if (channel_index >= num_channels_) {
+            return {};
+        }
+        std::remove_const_t<T> max_value = channels_[channel_index][0];
+        for (size_t frame = 0; frame < num_frames_; ++frame) {
+            max_value = std::max(max_value, std::fabs(channels_[channel_index][frame]));
+        }
+        return max_value;
+    }
+
+    /**
+     * Returns a copy of this view with given number of channels.
+     * @param num_channels The number of channels. Limited to the current amount of channels.
+     * @return A copy of this view with the given number of channels.
+     */
+    AudioBufferView with_num_channels(const size_t num_channels) {
+        return AudioBufferView(channels_, std::min(num_channels, num_channels_), num_frames_);
+    }
+
+    /**
+     * Returns a copy of this view with given number of frames.
+     * @param num_frames The number of frames, limited by the current amount of frames.
+     * @return A copy of this view with the given number of frames.
+     */
+    AudioBufferView with_num_frames(const size_t num_frames) {
+        return AudioBufferView(channels_, num_channels_, std::min(num_frames, num_frames_));
+    }
+
+    /**
+     * @return A new AudioBufferView pointing to the same data, but const.
+     */
+    AudioBufferView<std::add_const_t<T>> const_view() const {
+        return AudioBufferView<std::add_const_t<T>>(channels_, num_channels_, num_frames_);
+    }
+
+  protected:
+    /**
+     * Updates the channel pointers, number of channels and number of frames.
+     * @param channels The channels.
+     * @param num_channels The number of channels.
+     * @param num_frames The number of frames.
+     */
+    void update(T* const* channels, const size_t num_channels, const size_t num_frames) {
+        channels_ = num_channels > 0 && num_frames > 0 ? channels : nullptr;
+        num_channels_ = num_channels;
+        num_frames_ = num_frames;
+    }
+
+  private:
+    T* const* channels_ {};
+    size_t num_channels_ {};
+    size_t num_frames_ {};
+
+    template<class First, class Last>
+    void clear_audio_data(First first, Last last) const {
+        if constexpr (std::is_unsigned_v<T>) {
+            std::fill(first, last, std::numeric_limits<T>::max() / 2 + 1);
+        } else {
+            std::fill(first, last, T {});
+        }
+    }
+};
+
+}  // namespace rav
