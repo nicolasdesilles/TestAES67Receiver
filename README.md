@@ -3,20 +3,24 @@
 Minimal headless **AES67/RAVENNA receiver CLI** built on `external/ravennakit/`.
 
 ### What it does
+
 - **Queries an NMOS registry** (IS-04 Query API) to list RTP audio senders
 - Lets you **select a sender**
 - Fetches its **SDP** from `manifest_href`
 - Starts a `rav::RavennaReceiver` and plays audio to **ALSA** via **PortAudio**
 
 ### Build prerequisites
+
 - **CMake 3.22+**
 - **C++17 toolchain**
 - `python3` (for vcpkg bootstrap scripts)
 
 On Armbian (Rock2A): also install ALSA headers for PortAudio:
+
 - `libasound2-dev`
 
 ### Build (macOS)
+
 From repo root:
 
 ```bash
@@ -31,11 +35,12 @@ cmake --build build -j
 ```
 
 ### Build (Armbian / Linux arm64)
+
 Install basics:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential cmake ninja-build pkg-config python3 libasound2-dev
+sudo apt-get install -y build-essential cmake ninja-build pkg-config python3 libasound2-dev zip unzip
 ```
 
 Build:
@@ -52,6 +57,7 @@ cmake --build build -j
 ```
 
 ### Run
+
 First list audio devices (optional):
 
 ```bash
@@ -65,5 +71,6 @@ Then receive:
 ```
 
 Notes:
+
 - `--interfaces` must match a real system network interface selector that ravennakit can resolve (identifier/display name/MAC/IP).
 - `--audio-device "<PortAudio device name>"` can be used to force a specific output device.
