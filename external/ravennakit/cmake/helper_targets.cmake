@@ -67,9 +67,13 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
             -Wzero-as-null-pointer-constant>)
 endif ()
 
+option(RAV_ENABLE_LTO "Enable Link Time Optimization (LTO) flags for Release builds" ON)
+
 add_library(rav_recommended_lto_flags INTERFACE)
 
-if ((CMAKE_CXX_COMPILER_ID STREQUAL "MSVC") OR (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"))
+if (NOT RAV_ENABLE_LTO)
+    # Intentionally empty: consumers may still enable IPO/LTO via their own toolchain flags.
+elseif ((CMAKE_CXX_COMPILER_ID STREQUAL "MSVC") OR (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"))
     target_compile_options(rav_recommended_lto_flags INTERFACE
             $<$<CONFIG:Release>:$<IF:$<STREQUAL:"${CMAKE_CXX_COMPILER_ID}","MSVC">,-GL,-flto>>)
     target_link_libraries(rav_recommended_lto_flags INTERFACE

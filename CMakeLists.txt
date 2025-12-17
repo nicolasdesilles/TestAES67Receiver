@@ -12,6 +12,10 @@ set(RAV_TESTS OFF CACHE BOOL "" FORCE)
 set(RAV_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(RAV_TOOLS OFF CACHE BOOL "" FORCE)
 
+# Building on small ARM SBCs frequently OOMs with -flto (cc1plus killed).
+# Allow enabling it explicitly, but keep it OFF by default here.
+set(RAV_ENABLE_LTO OFF CACHE BOOL "" FORCE)
+
 add_subdirectory(external/ravennakit)
 add_subdirectory(apps/aes67_rx_cli)
 
