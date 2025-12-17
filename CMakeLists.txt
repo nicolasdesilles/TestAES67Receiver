@@ -6,6 +6,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Low-power SBCs commonly OOM while compiling heavy translation units.
+# This option reduces per-file compiler memory usage (at the cost of a bit of runtime perf).
+option(LOW_MEM_BUILD "Reduce compiler memory usage (recommended on small SBCs)" ON)
+if (LOW_MEM_BUILD)
+  set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+endif ()
+
 # Disable ravennakit extras (we only need the library).
 set(RAV_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(RAV_TESTS OFF CACHE BOOL "" FORCE)
