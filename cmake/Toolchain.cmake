@@ -16,6 +16,13 @@ endif ()
 
 set(VCPKG_OVERLAY_TRIPLETS "${_ROOT_DIR}/external/ravennakit/triplets" CACHE STRING "" FORCE)
 
+# Important: our project root does not have a vcpkg.json, but ravennakit does.
+# Point vcpkg manifest mode at ravennakit so dependencies like fmt/boost/portaudio get installed.
+set(VCPKG_MANIFEST_DIR "${_ROOT_DIR}/external/ravennakit" CACHE STRING "" FORCE)
+
+# For older vcpkg versions, manifests may require an explicit feature flag (harmless on newer versions).
+set(VCPKG_FEATURE_FLAGS "manifests" CACHE STRING "" FORCE)
+
 include("${_VCPKG_DIR}/scripts/buildsystems/vcpkg.cmake")
 
 
