@@ -24,7 +24,7 @@ class AudioOutput {
     [[nodiscard]] virtual std::optional<AudioDeviceInfo> default_output_device() = 0;
 };
 
-// Factory for the default implementation (PortAudio -> ALSA on Linux).
+// Factory for the default implementation (ALSA on Linux).
 [[nodiscard]] std::unique_ptr<AudioOutput> create_portaudio_output();
 
 }  // namespace app

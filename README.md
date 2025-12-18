@@ -43,6 +43,31 @@ sudo apt-get update
 sudo apt-get install -y build-essential cmake ninja-build pkg-config python3 libasound2-dev zip unzip
 ```
 
+### Build (macOS -> Linux/arm64 binary using Docker)
+
+If your Mac is Apple Silicon, this is typically the fastest way to produce an Armbian-compatible `linux-arm64` binary.
+
+From repo root:
+
+```bash
+docker run --rm -it \
+  --platform=linux/arm64 \
+  -v "$PWD:/src" \
+  -v "$HOME/.cache/vcpkg:/root/.cache/vcpkg" \
+  -w /src \
+  debian:trixie-slim bash -lc '
+    apt-get update && apt-get install -y \
+      build-essential cmake ninja-build pkg-config python3 git zip unzip curl ca-certificates libasound2-dev
+    ./external/ravennakit/submodules/vcpkg/bootstrap-vcpkg.sh
+    cmake -S . -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/Toolchain.cmake \
+      -DVCPKG_TARGET_TRIPLET=linux-arm64 \
+      -DLOW_MEM_BUILD=ON
+    cmake --build build --parallel $(nproc)
+  '
+```
+
 Build:
 
 ```bash
@@ -74,3 +99,4 @@ Notes:
 
 - `--interfaces` must match a real system network interface selector that ravennakit can resolve (identifier/display name/MAC/IP).
 - `--audio-device "<PortAudio device name>"` can be used to force a specific output device.
+- On Linux, prefer ALSA directly: `--alsa-device "hw:1,0"` (for your `rk3528-acodec` shown by `aplay -l` as card 1).

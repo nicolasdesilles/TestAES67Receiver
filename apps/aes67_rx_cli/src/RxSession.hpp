@@ -4,21 +4,23 @@
 #include "ravennakit/ravenna/ravenna_node.hpp"
 #include "ravennakit/ravenna/ravenna_receiver.hpp"
 
+#include <atomic>
 #include <optional>
 #include <string>
-
-struct PaStreamCallbackTimeInfo;
-using PaStreamCallbackFlags = unsigned long;
+#include <thread>
+#include <vector>
 
 namespace app {
 
 struct RxConfig {
     std::string interfaces;         // comma-separated for ravennakit parser
-    std::string audio_device_name;  // PortAudio device name (as shown in list)
+    std::string alsa_device = "default";  // ALSA pcm name, e.g. "hw:1,0"
     uint32_t playout_delay_frames = 240;
+    std::string nmos_registry_url;  // If set, enable NMOS node and register to this registry
+    uint16_t nmos_api_port = 0;     // NMOS node API port (0 = auto-assign)
 };
 
-// Owns a RavennaNode + a single receiver, and provides a PortAudio callback for playout.
+// Owns a RavennaNode + a single receiver, and provides ALSA playback.
 class RxSession final: public rav::RavennaReceiver::Subscriber, public rav::ptp::Instance::Subscriber {
   public:
     RxSession();
@@ -33,26 +35,30 @@ class RxSession final: public rav::RavennaReceiver::Subscriber, public rav::ptp:
     // ravenna_receiver::subscriber
     void ravenna_receiver_parameters_updated(const rav::rtp::AudioReceiver::ReaderParameters& parameters) override;
 
-    // PortAudio stream callback
-    int pa_callback(const void* input, void* output, unsigned long frame_count);
-
   private:
-    class PortAudioStream;
-    static int pa_callback_trampoline(
-        const void* input,
-        void* output,
-        unsigned long frame_count,
-        const PaStreamCallbackTimeInfo* time_info,
-        PaStreamCallbackFlags status_flags,
-        void* user_data
-    );
-
     rav::RavennaNode node_;
     RxConfig cfg_;
     rav::Id receiver_id_;
     rav::AudioFormat audio_format_;
-    std::unique_ptr<PortAudioStream> pa_stream_;
     bool started_ = false;
+
+    std::atomic<bool> audio_keep_going_ {false};
+    std::thread audio_thread_;
+    void* alsa_pcm_ = nullptr;  // snd_pcm_t*, opaque to avoid ALSA headers in header file
+    int alsa_format_ = 0;  // snd_pcm_format_t (int to avoid ALSA headers in header file)
+    void close_alsa();
+    void open_alsa_or_throw();
+    void start_audio_thread();
+    void stop_audio_thread();
+
+    // Signal level monitoring
+    std::atomic<double> signal_rms_db_ {std::numeric_limits<double>::quiet_NaN()};
+    std::atomic<double> signal_peak_db_ {std::numeric_limits<double>::quiet_NaN()};
+    std::thread stats_thread_;
+    std::atomic<bool> stats_keep_going_ {false};
+    void start_stats_thread();
+    void stop_stats_thread();
+    static double calculate_rms_db(const uint8_t* data, size_t bytes, const rav::AudioFormat& fmt);
 };
 
 }  // namespace app

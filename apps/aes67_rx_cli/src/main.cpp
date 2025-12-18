@@ -73,12 +73,12 @@ int main(int argc, char** argv) {
     rav::set_log_level_from_env();
     rav::do_system_checks();
 
-    CLI::App app {"aes67_rx_cli (NMOS registry -> SDP -> RAVENNA receiver -> ALSA via PortAudio)"};
+    CLI::App app {"aes67_rx_cli (NMOS registry -> SDP -> RAVENNA receiver -> ALSA)"};
     argv = app.ensure_utf8(argv);
 
     std::string registry;
     std::string interfaces;
-    std::string audio_device;
+    std::string alsa_device = "default";
     std::string query_version = "v1.3";
     bool list_audio_devices = false;
 
@@ -89,41 +89,21 @@ int main(int argc, char** argv) {
            "Comma-separated interface selector(s). Each entry can be identifier/display name/description/MAC/IP (ravennakit parser)"
     )
         ->required();
-    app.add_option("--audio-device", audio_device, "PortAudio output device name (if omitted, uses default output)");
+    app.add_option("--alsa-device", alsa_device, "ALSA PCM name (e.g. hw:1,0 for rk3528-acodec; default: default)");
     app.add_option("--query-version", query_version, "NMOS Query API version (default: v1.3)");
-    app.add_flag("--list-audio-devices", list_audio_devices, "List output devices and exit");
+    app.add_flag("--list-audio-devices", list_audio_devices, "List ALSA output devices and exit");
 
     CLI11_PARSE(app, argc, argv);
 
-    // Audio device listing / selection
-    auto audio = app::create_portaudio_output();
+    // Audio device listing
     if (list_audio_devices) {
+        auto audio = app::create_portaudio_output();
         const auto devices = audio->list_output_devices();
-        fmt::println("PortAudio output devices:");
+        fmt::println("ALSA output devices:");
         for (const auto& d : devices) {
             fmt::println("  - {}", d.name);
         }
         return 0;
-    }
-
-    if (audio_device.empty()) {
-        // If no explicit device, prefer the default; otherwise prompt from list.
-        if (!audio->default_output_device().has_value()) {
-            const auto devices = audio->list_output_devices();
-            if (devices.empty()) {
-                fmt::println("No PortAudio output devices found.");
-                return 1;
-            }
-            fmt::println("No default output device. Choose one:");
-            for (size_t i = 0; i < devices.size(); ++i) {
-                fmt::println("  [{}] {}", i, devices[i].name);
-            }
-            const auto chosen = prompt_index(devices.size());
-            if (!chosen) {
-                return 0;
-            }
-            audio_device = devices[*chosen].name;
-        }
     }
 
     // NMOS discovery via registry Query API
@@ -131,29 +111,42 @@ int main(int argc, char** argv) {
     app::NmosQueryClient query(registry_url);
 
     fmt::println("Querying NMOS registry {} ...", registry_url.buffer());
-    auto senders = query.list_senders(query_version);
+    auto all_senders = query.list_senders(query_version);
+
+    // Keep RTP variants (rtp, rtp.mcast, rtp.ucast, etc.)
+    std::vector<app::NmosSenderInfo> senders;
+    senders.reserve(all_senders.size());
+    for (auto& s : all_senders) {
+        if (s.transport.find("urn:x-nmos:transport:rtp") != std::string::npos) {
+            senders.push_back(std::move(s));
+        }
+    }
+
     if (senders.empty()) {
-        fmt::println("No NMOS RTP senders with manifest_href found.");
+        fmt::println("No NMOS RTP senders found in Query API response.");
+        fmt::println("Tip: check the registry Query API at /x-nmos/query/{}/senders", query_version);
         return 1;
     }
 
     fmt::println("Discovered senders:");
     for (size_t i = 0; i < senders.size(); ++i) {
         auto flow = query.get_flow(query_version, senders[i].flow_id);
+        const auto sdp_note = senders[i].manifest_href.empty() ? " (no manifest_href)" : "";
         if (flow) {
             const auto sr =
                 (flow->sample_rate_den != 0) ? (static_cast<double>(flow->sample_rate_num) / static_cast<double>(flow->sample_rate_den)) : 0.0;
             fmt::println(
-                "  [{}] {}  ({}, {}bit, {:.0f}Hz)  id={}",
+                "  [{}] {}{}  ({}, {}bit, {:.0f}Hz)  id={}",
                 i,
                 senders[i].label,
+                sdp_note,
                 flow->media_type.empty() ? "audio/?" : flow->media_type,
                 flow->bit_depth,
                 sr,
                 senders[i].id
             );
         } else {
-            fmt::println("  [{}] {}  id={}", i, senders[i].label, senders[i].id);
+            fmt::println("  [{}] {}{}  id={}", i, senders[i].label, sdp_note, senders[i].id);
         }
     }
 
@@ -163,6 +156,11 @@ int main(int argc, char** argv) {
     }
 
     const auto& sender = senders[*choice];
+    if (sender.manifest_href.empty()) {
+        fmt::println("Selected sender has no manifest_href, so this CLI cannot fetch SDP yet.");
+        fmt::println("Workaround: configure your sender/registry so the Sender resource provides manifest_href (SDP URL).");
+        return 1;
+    }
     fmt::println("Fetching SDP from manifest_href: {}", sender.manifest_href);
     const auto sdp_text = query.fetch_text_url(sender.manifest_href);
 
@@ -175,7 +173,9 @@ int main(int argc, char** argv) {
     app::RxSession session;
     app::RxConfig cfg;
     cfg.interfaces = interfaces;
-    cfg.audio_device_name = audio_device;
+    cfg.alsa_device = alsa_device;
+    cfg.nmos_registry_url = registry;  // Enable NMOS registration to the same registry we query
+    cfg.alsa_device = alsa_device;
 
     fmt::println("Starting receiver for SDP session: {}", parsed->session_name);
     session.start_from_sdp(*parsed, cfg);

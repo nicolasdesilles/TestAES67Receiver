@@ -1,11 +1,11 @@
 find_package(CLI11 CONFIG REQUIRED)
-find_package(portaudio CONFIG REQUIRED)
+find_package(ALSA REQUIRED)
 
 add_executable(aes67_rx_cli
   src/main.cpp
   src/NmosQueryClient.cpp
   src/RxSession.cpp
-  src/PortAudioOutput.cpp
+  src/AlsaOutput.cpp
 )
 
 target_include_directories(aes67_rx_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -21,15 +21,11 @@ else ()
   message(FATAL_ERROR "CLI11 package found but no known CMake target (expected CLI11::CLI11 or CLI11)")
 endif ()
 
-# PortAudio target name can vary by packaging.
-if (TARGET portaudio_static)
-  target_link_libraries(aes67_rx_cli PRIVATE portaudio_static)
-elseif (TARGET portaudio)
-  target_link_libraries(aes67_rx_cli PRIVATE portaudio)
-elseif (TARGET PortAudio::PortAudio)
-  target_link_libraries(aes67_rx_cli PRIVATE PortAudio::PortAudio)
+# ALSA library
+if (TARGET ALSA::ALSA)
+  target_link_libraries(aes67_rx_cli PRIVATE ALSA::ALSA)
 else ()
-  message(FATAL_ERROR "portaudio package found but no known CMake target (expected portaudio_static, portaudio, or PortAudio::PortAudio)")
+  # Fallback for older FindALSA behavior
+  target_include_directories(aes67_rx_cli PRIVATE ${ALSA_INCLUDE_DIRS})
+  target_link_libraries(aes67_rx_cli PRIVATE ${ALSA_LIBRARIES})
 endif ()
-
-

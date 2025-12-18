@@ -7,6 +7,7 @@
 
 #include <boost/json/parse.hpp>
 #include <boost/json/serialize.hpp>
+#include <boost/system/error_code.hpp>
 #include <boost/url/parse.hpp>
 
 #include <future>
@@ -35,7 +36,7 @@ boost::urls::url parse_url_or_throw(const std::string& url_str) {
 }
 
 boost::json::value parse_json_or_throw(const std::string& body) {
-    boost::json::error_code ec;
+    boost::system::error_code ec;
     auto jv = boost::json::parse(body, ec);
     if (ec) {
         throw std::runtime_error("Failed to parse JSON: " + std::string(ec.message()));
@@ -154,13 +155,7 @@ std::vector<NmosSenderInfo> NmosQueryClient::list_senders(const std::string_view
         s.flow_id = get_string_or_empty(obj, "flow_id");
         s.device_id = get_string_or_empty(obj, "device_id");
 
-        // Only keep RTP senders with a manifest href.
-        if (s.transport != "urn:x-nmos:transport:rtp") {
-            continue;
-        }
-        if (s.manifest_href.empty()) {
-            continue;
-        }
+        // Keep all senders; filtering happens in the CLI so we can show the user what's present.
         if (s.label.empty()) {
             s.label = s.id;
         }
