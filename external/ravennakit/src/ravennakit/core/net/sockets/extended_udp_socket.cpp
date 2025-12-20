@@ -94,7 +94,13 @@ size_t rav::receive_from_socket(
     TRACY_ZONE_SCOPED;
     sockaddr_in src_addr {};
     iovec iov[1];
+#if RAV_APPLE
+    // macOS: IP_RECVDSTADDR returns just struct in_addr
     char ctrl_buf[CMSG_SPACE(sizeof(in_addr))];
+#else
+    // Linux: IP_PKTINFO returns struct in_pktinfo which is larger
+    char ctrl_buf[CMSG_SPACE(sizeof(struct in_pktinfo))];
+#endif
     msghdr msg {};
 
     iov[0].iov_base = data_buf.data();
@@ -115,11 +121,28 @@ size_t rav::receive_from_socket(
         return 0;
     }
 
+    // Get the local port for the destination endpoint
+    boost::system::error_code port_ec;
+    const auto local_port = socket.local_endpoint(port_ec).port();
+
     // Extract the destination IP from the control message
     for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
         if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_RECVDSTADDR_PKTINFO) {
+#if RAV_APPLE
+            // macOS: IP_RECVDSTADDR returns struct in_addr directly
             const auto* dst_addr = reinterpret_cast<struct in_addr*>(CMSG_DATA(cmsg));
-            dst_endpoint = boost::asio::ip::udp::endpoint(boost::asio::ip::address_v4(ntohl(dst_addr->s_addr)), ntohs(src_addr.sin_port));
+            dst_endpoint = boost::asio::ip::udp::endpoint(
+                boost::asio::ip::address_v4(ntohl(dst_addr->s_addr)),
+                local_port
+            );
+#else
+            // Linux: IP_PKTINFO returns struct in_pktinfo
+            const auto* pktinfo = reinterpret_cast<struct in_pktinfo*>(CMSG_DATA(cmsg));
+            dst_endpoint = boost::asio::ip::udp::endpoint(
+                boost::asio::ip::address_v4(ntohl(pktinfo->ipi_addr.s_addr)),
+                local_port
+            );
+#endif
         }
     }
 

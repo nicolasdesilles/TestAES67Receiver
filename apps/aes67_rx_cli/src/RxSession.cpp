@@ -15,6 +15,7 @@
 #include <alsa/asoundlib.h>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -49,7 +50,20 @@ void RxSession::start_from_sdp(const rav::sdp::SessionDescription& sdp, const Rx
         throw std::runtime_error("Failed to parse --interfaces (must match a system interface identifier/name/MAC/IP)");
     }
 
-    node_.set_network_interface_config(*nic).wait();
+    // Log the parsed network interface config for debugging
+    RAV_LOG_INFO("Network interface config: {}", nic->to_string());
+    const auto iface_addrs = nic->get_interface_ipv4_addresses();
+    for (size_t i = 0; i < iface_addrs.size(); ++i) {
+        RAV_LOG_INFO("  Interface[{}] IPv4: {}", i, iface_addrs[i].to_string());
+    }
+
+    try {
+        node_.set_network_interface_config(*nic).get();  // Use .get() to rethrow exceptions
+        RAV_LOG_INFO("Network interface config set successfully (PTP ports should be created on 319/320)");
+    } catch (const std::exception& e) {
+        RAV_LOG_ERROR("Failed to set network interface config: {} (likely permission denied for PTP ports 319/320 - try running with sudo)", e.what());
+        throw;
+    }
 
     rav::RavennaReceiver::Configuration rcfg;
     rcfg.sdp = sdp;
@@ -122,6 +136,21 @@ void RxSession::ravenna_receiver_parameters_updated(const rav::rtp::AudioReceive
         return;
     }
 
+    // Log stream info for debugging
+    for (size_t i = 0; i < parameters.streams.size(); ++i) {
+        const auto& stream = parameters.streams[i];
+        if (!stream.is_valid()) {
+            continue;
+        }
+        RAV_LOG_INFO(
+            "Stream[{}]: connection_addr={}, rtp_port={}, packet_time_frames={}",
+            i,
+            stream.session.connection_address.to_string(),
+            stream.session.rtp_port,
+            stream.packet_time_frames
+        );
+    }
+
     if (!parameters.audio_format.is_valid()) {
         return;
     }
@@ -146,6 +175,38 @@ void RxSession::ravenna_receiver_parameters_updated(const rav::rtp::AudioReceive
     } catch (const std::exception& e) {
         RAV_LOG_ERROR("Failed to open ALSA output: {}", e.what());
     }
+}
+
+void RxSession::ravenna_receiver_stream_state_updated(
+    const rav::rtp::AudioReceiver::StreamInfo& stream_info, const rav::rtp::AudioReceiver::StreamState state) {
+    const char* state_str = "unknown";
+    switch (state) {
+        case rav::rtp::AudioReceiver::StreamState::inactive:
+            state_str = "inactive";
+            break;
+        case rav::rtp::AudioReceiver::StreamState::receiving:
+            state_str = "receiving";
+            break;
+        case rav::rtp::AudioReceiver::StreamState::no_consumer:
+            state_str = "no_consumer";
+            break;
+    }
+    RAV_LOG_INFO(
+        "Stream state changed: {} -> {} (addr={}, port={})",
+        state_str,
+        state_str,
+        stream_info.session.connection_address.to_string(),
+        stream_info.session.rtp_port
+    );
+}
+
+void RxSession::ptp_parent_changed(const rav::ptp::ParentDs& parent) {
+    RAV_LOG_INFO(
+        "PTP parent changed: GM identity={}, priority1={}, priority2={}",
+        parent.grandmaster_identity.to_string(),
+        parent.grandmaster_priority1,
+        parent.grandmaster_priority2
+    );
 }
 
 void RxSession::close_alsa() {
@@ -280,33 +341,47 @@ void RxSession::start_audio_thread() {
             const auto buffer_size = static_cast<size_t>(frames) * audio_format_.bytes_per_frame();
 
             auto& clock = get_local_clock();
-            if (!clock.is_calibrated()) {
-                std::memset(buf.data(), audio_format_.ground_value(), buffer_size);
-            } else {
-                const auto ptp_ts = clock.now().to_rtp_timestamp32(audio_format_.sample_rate)
-                    - static_cast<uint32_t>(cfg_.playout_delay_frames);
+            const bool clock_calibrated = clock.is_calibrated();
+            
+            // Track clock status for logging
+            clock_valid_.store(clock.is_valid(), std::memory_order_relaxed);
+            clock_locked_.store(clock.is_locked(), std::memory_order_relaxed);
+            clock_calibrated_.store(clock_calibrated, std::memory_order_relaxed);
 
-                auto rtp_ts = node_.read_data_realtime(receiver_id_, buf.data(), buffer_size, {}, {});
-                if (!rtp_ts) {
-                    std::memset(buf.data(), audio_format_.ground_value(), buffer_size);
-                    // Silence
-                    signal_rms_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
-                    signal_peak_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
-                } else {
+            // Always attempt to read data (for debugging), even if clock not calibrated.
+            // When calibrated, use PTP timestamp; otherwise read without timestamp requirement.
+            auto rtp_ts = node_.read_data_realtime(receiver_id_, buf.data(), buffer_size, {}, {});
+            if (!rtp_ts) {
+                buffers_no_data_.fetch_add(1, std::memory_order_relaxed);
+                std::memset(buf.data(), audio_format_.ground_value(), buffer_size);
+                // Silence
+                signal_rms_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+                signal_peak_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+                signal_max_abs_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+            } else {
+                buffers_with_data_.fetch_add(1, std::memory_order_relaxed);
+                
+                // If clock is calibrated, do drift correction
+                if (clock_calibrated) {
+                    const auto ptp_ts = clock.now().to_rtp_timestamp32(audio_format_.sample_rate)
+                        - static_cast<uint32_t>(cfg_.playout_delay_frames);
                     auto drift = rav::WrappingUint32(ptp_ts).diff(rav::WrappingUint32(*rtp_ts));
                     if (static_cast<uint32_t>(std::abs(drift)) > frames * 2) {
                         (void)node_.read_data_realtime(receiver_id_, buf.data(), buffer_size, ptp_ts, {});
                     }
-                    if (audio_format_.byte_order == rav::AudioFormat::ByteOrder::be) {
-                        rav::swap_bytes(buf.data(), buffer_size, audio_format_.bytes_per_sample());
-                    }
-
-                    // Calculate signal levels for monitoring (before format conversion).
-                    const double rms_db = calculate_rms_db(buf.data(), buffer_size, audio_format_);
-                    signal_rms_db_.store(rms_db, std::memory_order_relaxed);
-                    // Peak is approximated as RMS * sqrt(2) for simplicity.
-                    signal_peak_db_.store(rms_db + 3.0, std::memory_order_relaxed);
                 }
+                
+                if (audio_format_.byte_order == rav::AudioFormat::ByteOrder::be) {
+                    rav::swap_bytes(buf.data(), buffer_size, audio_format_.bytes_per_sample());
+                }
+
+                // Calculate signal levels for monitoring (before format conversion).
+                const double rms_db = calculate_rms_db(buf.data(), buffer_size, audio_format_);
+                const double max_abs = calculate_max_abs(buf.data(), buffer_size, audio_format_);
+                signal_rms_db_.store(rms_db, std::memory_order_relaxed);
+                // Peak is approximated as RMS * sqrt(2) for simplicity.
+                signal_peak_db_.store(rms_db + 3.0, std::memory_order_relaxed);
+                signal_max_abs_.store(max_abs, std::memory_order_relaxed);
             }
 
             // Format conversion if ALSA format differs from input format (e.g., 24-bit → S32_LE or S16_LE).
@@ -380,16 +455,49 @@ void RxSession::start_stats_thread() {
     }
     stats_keep_going_.store(true, std::memory_order_relaxed);
     stats_thread_ = std::thread([this]() {
+        uint64_t prev_buffers_with_data = 0;
+        uint64_t prev_buffers_no_data = 0;
         while (stats_keep_going_.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
 
             const double rms = signal_rms_db_.load(std::memory_order_relaxed);
             const double peak = signal_peak_db_.load(std::memory_order_relaxed);
+            const double max_abs = signal_max_abs_.load(std::memory_order_relaxed);
+            const uint64_t data_buffers = buffers_with_data_.load(std::memory_order_relaxed);
+            const uint64_t empty_buffers = buffers_no_data_.load(std::memory_order_relaxed);
+            const uint64_t data_per_sec = data_buffers - prev_buffers_with_data;
+            const uint64_t empty_per_sec = empty_buffers - prev_buffers_no_data;
+            prev_buffers_with_data = data_buffers;
+            prev_buffers_no_data = empty_buffers;
+            
+            // PTP clock status
+            const bool clk_valid = clock_valid_.load(std::memory_order_relaxed);
+            const bool clk_locked = clock_locked_.load(std::memory_order_relaxed);
+            const bool clk_calibrated = clock_calibrated_.load(std::memory_order_relaxed);
+            const std::string ptp_status = fmt::format(
+                "PTP[valid={},locked={},cal={}]",
+                clk_valid ? "Y" : "N",
+                clk_locked ? "Y" : "N",
+                clk_calibrated ? "Y" : "N"
+            );
 
             if (std::isnan(rms) || std::isnan(peak)) {
-                fmt::println("[Signal] RMS: --- dB, Peak: --- dB (silence/no data)");
+                fmt::println(
+                    "[Signal] RMS: --- dB (no data) | data/s={}, empty/s={} | {}",
+                    data_per_sec,
+                    empty_per_sec,
+                    ptp_status
+                );
             } else {
-                fmt::println("[Signal] RMS: {:.1f} dB, Peak: {:.1f} dB", rms, peak);
+                fmt::println(
+                    "[Signal] RMS: {:.1f} dB, Peak: {:.1f} dB, max_abs={:.3f} | data/s={}, empty/s={} | {}",
+                    rms,
+                    peak,
+                    max_abs,
+                    data_per_sec,
+                    empty_per_sec,
+                    ptp_status
+                );
             }
         }
     });
@@ -453,6 +561,54 @@ double RxSession::calculate_rms_db(const uint8_t* data, size_t bytes, const rav:
     // Convert to dB (avoid log(0))
     const double rms_db = rms > 0.0 ? 20.0 * std::log10(rms) : std::numeric_limits<double>::lowest();
     return rms_db;
+}
+
+double RxSession::calculate_max_abs(const uint8_t* data, size_t bytes, const rav::AudioFormat& fmt) {
+    if (bytes == 0 || !fmt.is_valid()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const size_t num_samples = bytes / fmt.bytes_per_sample();
+    if (num_samples == 0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    double max_abs = 0.0;
+
+    switch (fmt.encoding) {
+        case rav::AudioEncoding::pcm_s16: {
+            const int16_t* samples = reinterpret_cast<const int16_t*>(data);
+            for (size_t i = 0; i < num_samples; ++i) {
+                const double normalized = static_cast<double>(samples[i]) / 32768.0;
+                max_abs = std::max(max_abs, std::abs(normalized));
+            }
+            break;
+        }
+        case rav::AudioEncoding::pcm_s24: {
+            for (size_t i = 0; i < num_samples; ++i) {
+                const int32_t sample_raw = static_cast<int32_t>(
+                    static_cast<uint32_t>(data[i * 3]) | (static_cast<uint32_t>(data[i * 3 + 1]) << 8)
+                    | (static_cast<uint32_t>(static_cast<int8_t>(data[i * 3 + 2])) << 16)
+                );
+                const int32_t sample = (sample_raw << 8) >> 8;
+                const double normalized = static_cast<double>(sample) / 8388608.0;
+                max_abs = std::max(max_abs, std::abs(normalized));
+            }
+            break;
+        }
+        case rav::AudioEncoding::pcm_s32: {
+            const int32_t* samples = reinterpret_cast<const int32_t*>(data);
+            for (size_t i = 0; i < num_samples; ++i) {
+                const double normalized = static_cast<double>(samples[i]) / 2147483648.0;
+                max_abs = std::max(max_abs, std::abs(normalized));
+            }
+            break;
+        }
+        default:
+            return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    return max_abs;
 }
 
 }  // namespace app
