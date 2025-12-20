@@ -29,9 +29,10 @@ elseif(VCPKG_TARGET_IS_IOS OR VCPKG_TARGET_IS_OSX)
     )
 else()
     vcpkg_list(APPEND options
-        -DPA_USE_JACK=ON
-        -DCMAKE_REQUIRE_FIND_PACKAGE_Jack=ON
-        -DPA_USE_ALSA=OFF
+        # For "blank" embedded Linux targets, ALSA is the most reliable default backend.
+        # JACK requires a running daemon + realtime permissions and is better suited for pro-audio routing setups.
+        -DPA_USE_JACK=OFF
+        -DPA_USE_ALSA=ON
     )
 endif()
 

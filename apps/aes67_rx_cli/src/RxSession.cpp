@@ -12,7 +12,7 @@
 #include "ravennakit/core/net/interfaces/network_interface_config.hpp"
 #include "ravennakit/nmos/nmos_node.hpp"
 
-#include <alsa/asoundlib.h>
+#include <portaudio.h>
 
 #include <array>
 #include <algorithm>
@@ -20,7 +20,6 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 
 #include <fmt/core.h>
@@ -28,6 +27,77 @@
 namespace app {
 
 namespace {
+constexpr unsigned long k_block_size_frames = 256; // frames per PortAudio callback
+
+class PortAudioInit {
+  public:
+    static void ensure() {
+        static PortAudioInit instance;
+        (void)instance;
+    }
+
+  private:
+    PortAudioInit() {
+        if (const auto err = Pa_Initialize(); err != paNoError) {
+            throw std::runtime_error(std::string("PortAudio init failed: ") + Pa_GetErrorText(err));
+        }
+    }
+
+    ~PortAudioInit() {
+        (void)Pa_Terminate();
+    }
+};
+
+static std::optional<PaDeviceIndex> find_output_device_index_by_name(const std::string& name) {
+    const auto n = Pa_GetDeviceCount();
+    if (n < 0) {
+        throw std::runtime_error(std::string("PortAudio device count failed: ") + Pa_GetErrorText(n));
+    }
+    for (PaDeviceIndex i = 0; i < n; ++i) {
+        const auto* info = Pa_GetDeviceInfo(i);
+        if (!info || info->maxOutputChannels <= 0 || !info->name) {
+            continue;
+        }
+        if (name == info->name) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+static std::optional<PaDeviceIndex> find_output_device_index_by_substring(const std::string& needle) {
+    const auto n = Pa_GetDeviceCount();
+    if (n < 0) {
+        throw std::runtime_error(std::string("PortAudio device count failed: ") + Pa_GetErrorText(n));
+    }
+    for (PaDeviceIndex i = 0; i < n; ++i) {
+        const auto* info = Pa_GetDeviceInfo(i);
+        if (!info || info->maxOutputChannels <= 0 || !info->name) {
+            continue;
+        }
+        if (std::string(info->name).find(needle) != std::string::npos) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+static std::optional<PaSampleFormat> pa_format_for_rav_format(const rav::AudioFormat& fmt) {
+    switch (fmt.encoding) {
+        case rav::AudioEncoding::pcm_u8:
+            return paUInt8;
+        case rav::AudioEncoding::pcm_s8:
+            return paInt8;
+        case rav::AudioEncoding::pcm_s16:
+            return paInt16;
+        case rav::AudioEncoding::pcm_s24:
+            return paInt24;
+        case rav::AudioEncoding::pcm_s32:
+            return paInt32;
+        default:
+            return std::nullopt;
+    }
+}
 }  // namespace
 
 RxSession::RxSession() {
@@ -101,12 +171,6 @@ void RxSession::start_from_sdp(const rav::sdp::SessionDescription& sdp, const Rx
         }
     }
 
-    // ALSA will be opened once we know the stream audio format.
-    close_alsa();
-
-    // ALSA will be opened once we know the stream audio format.
-    close_alsa();
-
     start_stats_thread();
     started_ = true;
 }
@@ -117,8 +181,7 @@ void RxSession::stop() {
     }
 
     stop_stats_thread();
-    stop_audio_thread();
-    close_alsa();
+    stop_portaudio();
 
     node_.unsubscribe_from_ptp_instance(this).wait();
     if (receiver_id_.is_valid()) {
@@ -131,6 +194,7 @@ void RxSession::stop() {
 }
 
 void RxSession::ravenna_receiver_parameters_updated(const rav::rtp::AudioReceiver::ReaderParameters& parameters) {
+    // Keep this callback lightweight; it may be called from the ravennakit maintenance thread.
     if (parameters.streams.empty()) {
         RAV_LOG_WARNING("Receiver has no streams yet");
         return;
@@ -162,18 +226,17 @@ void RxSession::ravenna_receiver_parameters_updated(const rav::rtp::AudioReceive
     audio_format_ = parameters.audio_format;
 
     try {
-        stop_audio_thread();
-        open_alsa_or_throw();
-        start_audio_thread();
+        stop_portaudio();
+        start_portaudio_or_throw();
         RAV_LOG_INFO(
-            "ALSA started: {}Hz, {}ch, {}, device='{}'",
+            "PortAudio started: {}Hz, {}ch, {}, device='{}'",
             audio_format_.sample_rate,
             audio_format_.num_channels,
             audio_format_.to_string(),
-            cfg_.alsa_device
+            cfg_.audio_device.empty() ? std::string("<default>") : cfg_.audio_device
         );
     } catch (const std::exception& e) {
-        RAV_LOG_ERROR("Failed to open ALSA output: {}", e.what());
+        RAV_LOG_ERROR("Failed to start PortAudio output: {}", e.what());
     }
 }
 
@@ -209,244 +272,145 @@ void RxSession::ptp_parent_changed(const rav::ptp::ParentDs& parent) {
     );
 }
 
-void RxSession::close_alsa() {
-    if (!alsa_pcm_) {
+void RxSession::stop_portaudio() {
+    if (!pa_stream_) {
         return;
     }
-    auto* pcm = static_cast<snd_pcm_t*>(alsa_pcm_);
-    snd_pcm_close(pcm);
-    alsa_pcm_ = nullptr;
+    auto* s = static_cast<PaStream*>(pa_stream_);
+    (void)Pa_StopStream(s);
+    (void)Pa_CloseStream(s);
+    pa_stream_ = nullptr;
 }
 
-void RxSession::open_alsa_or_throw() {
-    close_alsa();
+int RxSession::portaudio_stream_callback(
+    const void* input,
+    void* output,
+    const unsigned long frame_count,
+    const PaStreamCallbackTimeInfo* time_info,
+    const PaStreamCallbackFlags status_flags,
+    void* user_data
+) {
+    TRACY_ZONE_SCOPED;
+    std::ignore = input;
+    std::ignore = time_info;
+    std::ignore = status_flags;
+
+    auto* self = static_cast<RxSession*>(user_data);
+    if (!self || !output) {
+        return paAbort;
+    }
+
+    if (!self->receiver_id_.is_valid() || !self->audio_format_.is_valid()) {
+        return paContinue;
+    }
+
+    const auto buffer_size = static_cast<size_t>(frame_count) * self->audio_format_.bytes_per_frame();
+
+    auto& clock = self->get_local_clock();
+    const bool clock_calibrated = clock.is_calibrated();
+
+    // Track clock status for logging
+    self->clock_valid_.store(clock.is_valid(), std::memory_order_relaxed);
+    self->clock_locked_.store(clock.is_locked(), std::memory_order_relaxed);
+    self->clock_calibrated_.store(clock_calibrated, std::memory_order_relaxed);
+
+    if (!clock_calibrated) {
+        std::memset(output, self->audio_format_.ground_value(), buffer_size);
+        self->buffers_no_data_.fetch_add(1, std::memory_order_relaxed);
+        self->signal_rms_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+        self->signal_peak_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+        self->signal_max_abs_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+        return paContinue;
+    }
+
+    const auto ptp_ts = clock.now().to_rtp_timestamp32(self->audio_format_.sample_rate) - self->cfg_.playout_delay_frames;
+
+    // First try to read any data
+    auto rtp_ts = self->node_.read_data_realtime(self->receiver_id_, static_cast<uint8_t*>(output), buffer_size, {}, {});
+    if (!rtp_ts) {
+        std::memset(output, self->audio_format_.ground_value(), buffer_size);
+        self->buffers_no_data_.fetch_add(1, std::memory_order_relaxed);
+        self->signal_rms_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+        self->signal_peak_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+        self->signal_max_abs_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+        return paContinue;
+    }
+
+    self->buffers_with_data_.fetch_add(1, std::memory_order_relaxed);
+
+    // Drift correction (same approach as ravennakit example)
+    auto drift = rav::WrappingUint32(ptp_ts).diff(rav::WrappingUint32(*rtp_ts));
+    if (static_cast<uint32_t>(std::abs(drift)) > frame_count * 2) {
+        (void)self->node_.read_data_realtime(self->receiver_id_, static_cast<uint8_t*>(output), buffer_size, ptp_ts, {});
+    }
+
+    if (self->audio_format_.byte_order == rav::AudioFormat::ByteOrder::be) {
+        rav::swap_bytes(static_cast<uint8_t*>(output), buffer_size, self->audio_format_.bytes_per_sample());
+    }
+
+    // Signal monitoring (after swap, still same numeric values)
+    const double rms_db = RxSession::calculate_rms_db(static_cast<const uint8_t*>(output), buffer_size, self->audio_format_);
+    const double max_abs = RxSession::calculate_max_abs(static_cast<const uint8_t*>(output), buffer_size, self->audio_format_);
+    self->signal_rms_db_.store(rms_db, std::memory_order_relaxed);
+    self->signal_peak_db_.store(rms_db + 3.0, std::memory_order_relaxed);
+    self->signal_max_abs_.store(max_abs, std::memory_order_relaxed);
+
+    return paContinue;
+}
+
+void RxSession::start_portaudio_or_throw() {
+    stop_portaudio();
 
     if (!audio_format_.is_valid()) {
         throw std::runtime_error("Audio format not set yet");
     }
 
-    snd_pcm_t* pcm = nullptr;
-    const int open_err = snd_pcm_open(&pcm, cfg_.alsa_device.c_str(), SND_PCM_STREAM_PLAYBACK, 0);
-    if (open_err < 0) {
-        throw std::runtime_error(std::string("snd_pcm_open failed: ") + snd_strerror(open_err));
+    PortAudioInit::ensure();
+
+    const auto pa_fmt = pa_format_for_rav_format(audio_format_);
+    if (!pa_fmt) {
+        throw std::runtime_error("Unsupported PortAudio format for encoding: " + audio_format_.to_string());
     }
 
-    snd_pcm_hw_params_t* hw = nullptr;
-    snd_pcm_hw_params_alloca(&hw);
-    snd_pcm_hw_params_any(pcm, hw);
+    PaStreamParameters out {};
+    out.channelCount = static_cast<int>(audio_format_.num_channels);
+    out.sampleFormat = *pa_fmt;
+    out.hostApiSpecificStreamInfo = nullptr;
 
-    snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_channels(pcm, hw, static_cast<unsigned int>(audio_format_.num_channels));
-
-    unsigned int rate = static_cast<unsigned int>(audio_format_.sample_rate);
-    snd_pcm_hw_params_set_rate_near(pcm, hw, &rate, nullptr);
-
-    // Try format negotiation with fallbacks (many embedded codecs don't support all formats).
-    snd_pcm_format_t fmt = SND_PCM_FORMAT_UNKNOWN;
-    std::vector<snd_pcm_format_t> format_candidates;
-
-    switch (audio_format_.encoding) {
-        case rav::AudioEncoding::pcm_s16:
-            format_candidates = {SND_PCM_FORMAT_S16_LE};
-            break;
-        case rav::AudioEncoding::pcm_s24:
-            // Many codecs don't support S24_3LE; try S32_LE (pad MSB) then S16_LE (truncate) as fallbacks.
-            format_candidates = {SND_PCM_FORMAT_S24_3LE, SND_PCM_FORMAT_S32_LE, SND_PCM_FORMAT_S16_LE};
-            break;
-        case rav::AudioEncoding::pcm_s32:
-            format_candidates = {SND_PCM_FORMAT_S32_LE, SND_PCM_FORMAT_S16_LE};
-            break;
-        case rav::AudioEncoding::pcm_s8:
-            format_candidates = {SND_PCM_FORMAT_S8};
-            break;
-        case rav::AudioEncoding::pcm_u8:
-            format_candidates = {SND_PCM_FORMAT_U8};
-            break;
-        default:
-            snd_pcm_close(pcm);
-            throw std::runtime_error("Unsupported ALSA format for encoding: " + audio_format_.to_string());
-    }
-
-    bool format_set = false;
-    for (const auto candidate : format_candidates) {
-        const int fmt_err = snd_pcm_hw_params_set_format(pcm, hw, candidate);
-        if (fmt_err >= 0) {
-            fmt = candidate;
-            format_set = true;
-            if (candidate != format_candidates[0]) {
-                RAV_LOG_WARNING(
-                    "Requested format {} not supported; using fallback {}",
-                    snd_pcm_format_name(format_candidates[0]),
-                    snd_pcm_format_name(candidate)
-                );
-            }
-            break;
+    if (!cfg_.audio_device.empty()) {
+        // First try exact match, then substring match (more forgiving for ALSA device naming).
+        auto idx = find_output_device_index_by_name(cfg_.audio_device);
+        if (!idx) {
+            idx = find_output_device_index_by_substring(cfg_.audio_device);
         }
-    }
-
-    if (!format_set) {
-        snd_pcm_close(pcm);
-        throw std::runtime_error(
-            std::string("No supported ALSA format found (tried: ") + snd_pcm_format_name(format_candidates[0]) + ")"
-        );
-    }
-
-    // Store the actual format we're using (may differ from audio_format_ if we used a fallback).
-    alsa_format_ = fmt;
-
-    snd_pcm_uframes_t period = 256;
-    snd_pcm_hw_params_set_period_size_near(pcm, hw, &period, nullptr);
-    snd_pcm_uframes_t buffer = period * 4;
-    snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &buffer);
-
-    const int hw_err = snd_pcm_hw_params(pcm, hw);
-    if (hw_err < 0) {
-        snd_pcm_close(pcm);
-        throw std::runtime_error(std::string("snd_pcm_hw_params failed: ") + snd_strerror(hw_err));
-    }
-
-    const int prep_err = snd_pcm_prepare(pcm);
-    if (prep_err < 0) {
-        snd_pcm_close(pcm);
-        throw std::runtime_error(std::string("snd_pcm_prepare failed: ") + snd_strerror(prep_err));
-    }
-
-    alsa_pcm_ = pcm;
-}
-
-void RxSession::start_audio_thread() {
-    if (audio_thread_.joinable()) {
-        return;
-    }
-    audio_keep_going_.store(true, std::memory_order_relaxed);
-
-    audio_thread_ = std::thread([this]() {
-        TRACY_SET_THREAD_NAME("alsa_playout");
-
-        auto* pcm = static_cast<snd_pcm_t*>(alsa_pcm_);
-        if (!pcm) {
-            return;
+        if (!idx) {
+            throw std::runtime_error("PortAudio output device not found: " + cfg_.audio_device + " (use --list-audio-devices)");
         }
-
-        const unsigned long frames = 256;
-        std::vector<uint8_t> buf;
-        buf.resize(static_cast<size_t>(frames) * audio_format_.bytes_per_frame());
-
-        while (audio_keep_going_.load(std::memory_order_relaxed)) {
-            if (!receiver_id_.is_valid() || !audio_format_.is_valid()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-
-            const auto buffer_size = static_cast<size_t>(frames) * audio_format_.bytes_per_frame();
-
-            auto& clock = get_local_clock();
-            const bool clock_calibrated = clock.is_calibrated();
-            
-            // Track clock status for logging
-            clock_valid_.store(clock.is_valid(), std::memory_order_relaxed);
-            clock_locked_.store(clock.is_locked(), std::memory_order_relaxed);
-            clock_calibrated_.store(clock_calibrated, std::memory_order_relaxed);
-
-            // Always attempt to read data (for debugging), even if clock not calibrated.
-            // When calibrated, use PTP timestamp; otherwise read without timestamp requirement.
-            auto rtp_ts = node_.read_data_realtime(receiver_id_, buf.data(), buffer_size, {}, {});
-            if (!rtp_ts) {
-                buffers_no_data_.fetch_add(1, std::memory_order_relaxed);
-                std::memset(buf.data(), audio_format_.ground_value(), buffer_size);
-                // Silence
-                signal_rms_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
-                signal_peak_db_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
-                signal_max_abs_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
-            } else {
-                buffers_with_data_.fetch_add(1, std::memory_order_relaxed);
-                
-                // If clock is calibrated, do drift correction
-                if (clock_calibrated) {
-                    const auto ptp_ts = clock.now().to_rtp_timestamp32(audio_format_.sample_rate)
-                        - static_cast<uint32_t>(cfg_.playout_delay_frames);
-                    auto drift = rav::WrappingUint32(ptp_ts).diff(rav::WrappingUint32(*rtp_ts));
-                    if (static_cast<uint32_t>(std::abs(drift)) > frames * 2) {
-                        (void)node_.read_data_realtime(receiver_id_, buf.data(), buffer_size, ptp_ts, {});
-                    }
-                }
-                
-                if (audio_format_.byte_order == rav::AudioFormat::ByteOrder::be) {
-                    rav::swap_bytes(buf.data(), buffer_size, audio_format_.bytes_per_sample());
-                }
-
-                // Calculate signal levels for monitoring (before format conversion).
-                const double rms_db = calculate_rms_db(buf.data(), buffer_size, audio_format_);
-                const double max_abs = calculate_max_abs(buf.data(), buffer_size, audio_format_);
-                signal_rms_db_.store(rms_db, std::memory_order_relaxed);
-                // Peak is approximated as RMS * sqrt(2) for simplicity.
-                signal_peak_db_.store(rms_db + 3.0, std::memory_order_relaxed);
-                signal_max_abs_.store(max_abs, std::memory_order_relaxed);
-            }
-
-            // Format conversion if ALSA format differs from input format (e.g., 24-bit → S32_LE or S16_LE).
-            const auto fmt = static_cast<snd_pcm_format_t>(alsa_format_);
-            std::vector<uint8_t> converted_buf;
-            const uint8_t* write_buf = buf.data();
-            size_t write_frames = frames;
-
-            if (audio_format_.encoding == rav::AudioEncoding::pcm_s24 && fmt == SND_PCM_FORMAT_S32_LE) {
-                // 24-bit (3 bytes) → 32-bit: unpack and pad MSB (sign-extend).
-                converted_buf.resize(frames * audio_format_.num_channels * 4);
-                const uint8_t* src = buf.data();
-                int32_t* dst = reinterpret_cast<int32_t*>(converted_buf.data());
-                for (size_t i = 0; i < frames * audio_format_.num_channels; ++i) {
-                    // 24-bit little-endian: bytes [0,1,2] → int32_t (sign-extend).
-                    const int32_t sample = static_cast<int32_t>(
-                        static_cast<uint32_t>(src[i * 3]) | (static_cast<uint32_t>(src[i * 3 + 1]) << 8)
-                        | (static_cast<uint32_t>(static_cast<int8_t>(src[i * 3 + 2])) << 16)
-                    );
-                    // Sign-extend to 32-bit.
-                    dst[i] = (sample << 8) >> 8;
-                }
-                write_buf = converted_buf.data();
-            } else if (audio_format_.encoding == rav::AudioEncoding::pcm_s24 && fmt == SND_PCM_FORMAT_S16_LE) {
-                // 24-bit (3 bytes) → 16-bit: truncate (keep top 16 bits).
-                converted_buf.resize(frames * audio_format_.num_channels * 2);
-                const uint8_t* src = buf.data();
-                int16_t* dst = reinterpret_cast<int16_t*>(converted_buf.data());
-                for (size_t i = 0; i < frames * audio_format_.num_channels; ++i) {
-                    // Take top 16 bits from 24-bit sample.
-                    const int32_t sample = static_cast<int32_t>(
-                        static_cast<uint32_t>(src[i * 3]) | (static_cast<uint32_t>(src[i * 3 + 1]) << 8)
-                        | (static_cast<uint32_t>(static_cast<int8_t>(src[i * 3 + 2])) << 16)
-                    );
-                    dst[i] = static_cast<int16_t>(sample >> 8);
-                }
-                write_buf = converted_buf.data();
-            } else if (audio_format_.encoding == rav::AudioEncoding::pcm_s32 && fmt == SND_PCM_FORMAT_S16_LE) {
-                // 32-bit → 16-bit: truncate (keep top 16 bits).
-                converted_buf.resize(frames * audio_format_.num_channels * 2);
-                const int32_t* src = reinterpret_cast<const int32_t*>(buf.data());
-                int16_t* dst = reinterpret_cast<int16_t*>(converted_buf.data());
-                for (size_t i = 0; i < frames * audio_format_.num_channels; ++i) {
-                    dst[i] = static_cast<int16_t>(src[i] >> 16);
-                }
-                write_buf = converted_buf.data();
-            }
-
-            snd_pcm_sframes_t wrote = snd_pcm_writei(pcm, write_buf, write_frames);
-            if (wrote < 0) {
-                wrote = snd_pcm_recover(pcm, static_cast<int>(wrote), 1);
-                if (wrote < 0) {
-                    // If recover fails, back off a bit.
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-            }
+        out.device = *idx;
+        out.suggestedLatency = Pa_GetDeviceInfo(*idx)->defaultLowOutputLatency;
+    } else {
+        out.device = Pa_GetDefaultOutputDevice();
+        if (out.device == paNoDevice) {
+            throw std::runtime_error("No PortAudio default output device available");
         }
-    });
-}
-
-void RxSession::stop_audio_thread() {
-    audio_keep_going_.store(false, std::memory_order_relaxed);
-    if (audio_thread_.joinable()) {
-        audio_thread_.join();
+        out.suggestedLatency = Pa_GetDeviceInfo(out.device)->defaultLowOutputLatency;
     }
+
+    PaStream* stream = nullptr;
+    const auto err = Pa_OpenStream(
+        &stream, nullptr, &out, static_cast<double>(audio_format_.sample_rate), k_block_size_frames, paNoFlag,
+        &RxSession::portaudio_stream_callback, this
+    );
+    if (err != paNoError) {
+        throw std::runtime_error(std::string("Pa_OpenStream failed: ") + Pa_GetErrorText(err));
+    }
+
+    if (const auto start_err = Pa_StartStream(stream); start_err != paNoError) {
+        (void)Pa_CloseStream(stream);
+        throw std::runtime_error(std::string("Pa_StartStream failed: ") + Pa_GetErrorText(start_err));
+    }
+
+    pa_stream_ = stream;
 }
 
 void RxSession::start_stats_thread() {
@@ -558,9 +522,11 @@ double RxSession::calculate_rms_db(const uint8_t* data, size_t bytes, const rav:
     }
 
     const double rms = std::sqrt(sum_squares / static_cast<double>(num_samples));
-    // Convert to dB (avoid log(0))
-    const double rms_db = rms > 0.0 ? 20.0 * std::log10(rms) : std::numeric_limits<double>::lowest();
-    return rms_db;
+    // Convert to dB (return NaN for digital silence to display as "--- dB")
+    if (rms <= 0.0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return 20.0 * std::log10(rms);
 }
 
 double RxSession::calculate_max_abs(const uint8_t* data, size_t bytes, const rav::AudioFormat& fmt) {

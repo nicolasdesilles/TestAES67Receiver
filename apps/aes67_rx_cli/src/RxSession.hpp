@@ -10,17 +10,21 @@
 #include <thread>
 #include <vector>
 
+#include <portaudio.h>
+
 namespace app {
 
 struct RxConfig {
     std::string interfaces;         // comma-separated for ravennakit parser
-    std::string alsa_device = "default";  // ALSA pcm name, e.g. "hw:1,0"
+    // PortAudio output device name (see --list-audio-devices). Empty = PortAudio default output device.
+    // Note: PortAudio uses ALSA backend on Linux (Option A).
+    std::string audio_device;
     uint32_t playout_delay_frames = 240;
     std::string nmos_registry_url;  // If set, enable NMOS node and register to this registry
     uint16_t nmos_api_port = 0;     // NMOS node API port (0 = auto-assign)
 };
 
-// Owns a RavennaNode + a single receiver, and provides ALSA playback.
+// Owns a RavennaNode + a single receiver, and provides PortAudio playback (ALSA backend on Linux).
 class RxSession final: public rav::RavennaReceiver::Subscriber, public rav::ptp::Instance::Subscriber {
   public:
     RxSession();
@@ -47,14 +51,18 @@ class RxSession final: public rav::RavennaReceiver::Subscriber, public rav::ptp:
     rav::AudioFormat audio_format_;
     bool started_ = false;
 
-    std::atomic<bool> audio_keep_going_ {false};
-    std::thread audio_thread_;
-    void* alsa_pcm_ = nullptr;  // snd_pcm_t*, opaque to avoid ALSA headers in header file
-    int alsa_format_ = 0;  // snd_pcm_format_t (int to avoid ALSA headers in header file)
-    void close_alsa();
-    void open_alsa_or_throw();
-    void start_audio_thread();
-    void stop_audio_thread();
+    // PortAudio playout (callback-driven)
+    void* pa_stream_ = nullptr; // PaStream*
+    void start_portaudio_or_throw();
+    void stop_portaudio();
+    static int portaudio_stream_callback(
+        const void* input,
+        void* output,
+        unsigned long frame_count,
+        const PaStreamCallbackTimeInfo* time_info,
+        PaStreamCallbackFlags status_flags,
+        void* user_data
+    );
 
     // Signal level monitoring
     std::atomic<double> signal_rms_db_ {std::numeric_limits<double>::quiet_NaN()};

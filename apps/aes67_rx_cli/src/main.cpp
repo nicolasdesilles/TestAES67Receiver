@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
 
     std::string registry;
     std::string interfaces;
-    std::string alsa_device = "default";
+    std::string audio_device;
     std::string query_version = "v1.3";
     bool list_audio_devices = false;
 
@@ -89,9 +89,11 @@ int main(int argc, char** argv) {
            "Comma-separated interface selector(s). Each entry can be identifier/display name/description/MAC/IP (ravennakit parser)"
     )
         ->required();
-    app.add_option("--alsa-device", alsa_device, "ALSA PCM name (e.g. hw:1,0 for rk3528-acodec; default: default)");
+    app.add_option("--audio-device", audio_device, "PortAudio output device name (see --list-audio-devices). Empty = default.");
+    // Backwards-compatible alias (historically this CLI used direct ALSA). Now it maps to PortAudio device name.
+    app.add_option("--alsa-device", audio_device, "Alias of --audio-device (deprecated)");
     app.add_option("--query-version", query_version, "NMOS Query API version (default: v1.3)");
-    app.add_flag("--list-audio-devices", list_audio_devices, "List ALSA output devices and exit");
+    app.add_flag("--list-audio-devices", list_audio_devices, "List PortAudio output devices and exit");
 
     CLI11_PARSE(app, argc, argv);
 
@@ -99,7 +101,7 @@ int main(int argc, char** argv) {
     if (list_audio_devices) {
         auto audio = app::create_portaudio_output();
         const auto devices = audio->list_output_devices();
-        fmt::println("ALSA output devices:");
+        fmt::println("PortAudio output devices:");
         for (const auto& d : devices) {
             fmt::println("  - {}", d.name);
         }
@@ -173,9 +175,8 @@ int main(int argc, char** argv) {
     app::RxSession session;
     app::RxConfig cfg;
     cfg.interfaces = interfaces;
-    cfg.alsa_device = alsa_device;
+    cfg.audio_device = audio_device;
     cfg.nmos_registry_url = registry;  // Enable NMOS registration to the same registry we query
-    cfg.alsa_device = alsa_device;
 
     fmt::println("Starting receiver for SDP session: {}", parsed->session_name);
     session.start_from_sdp(*parsed, cfg);
