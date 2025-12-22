@@ -144,21 +144,30 @@ class IS04RegistrationWorker:
     async def _upsert_resource(self, collection: str, resource_id: str, payload: Dict[str, Any]) -> None:
         if not self._registry:
             return
-        url = f"{self._registry.url}/resource/{collection}"
+        resource_type = collection[:-1]
+        url = f"{self._registry.url}/resource"
         envelope = {
-            "type": collection[:-1],
-            "id": resource_id,
+            "type": resource_type,
             "data": payload,
         }
+
         response = await self._client.post(url, json=envelope)
         if response.status_code in (200, 201, 202):
             return
+
         if response.status_code == 409:
-            LOGGER.info("Resource %s already registered, updating", resource_id)
-            url = f"{self._registry.url}/resource/{collection}/{resource_id}"
-            response = await self._client.put(url, json=envelope)
+            # Per IS-04 Registration API, resources are managed via POST /resource and DELETE/GET
+            # on /resource/{resourceType}/{resourceId}. Some registries return 409 if the resource
+            # already exists; delete+recreate is a safe prototype behaviour.
+            delete_url = f"{self._registry.url}/resource/{resource_type}/{resource_id}"
+            LOGGER.info("Resource %s already present; deleting %s then re-registering", resource_id, delete_url)
+            delete_resp = await self._client.delete(delete_url)
+            if delete_resp.status_code not in (200, 204, 404):
+                delete_resp.raise_for_status()
+            response = await self._client.post(url, json=envelope)
             response.raise_for_status()
             return
+
         response.raise_for_status()
 
     def _build_node_resource(self, version: str) -> Dict[str, Any]:
