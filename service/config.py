@@ -41,6 +41,7 @@ class DaemonConfig(BaseModel):
         description="Base URL of the local aes67-linux-daemon HTTP API",
     )
     sink_id: int = Field(0, ge=0, description="Sink identifier to manage on the daemon")
+    status_poll_interval: float = Field(2.0, gt=0, description="Seconds between daemon status polls")
 
 
 class AudioConfig(BaseModel):
@@ -78,7 +79,7 @@ def _default_registry_config() -> RegistryConfig:
 
 
 def _default_daemon_config() -> DaemonConfig:
-    return DaemonConfig(base_url=_DEFAULT_DAEMON_URL, sink_id=0)
+    return DaemonConfig(base_url=_DEFAULT_DAEMON_URL, sink_id=0, status_poll_interval=2.0)
 
 
 def _default_audio_config() -> AudioConfig:

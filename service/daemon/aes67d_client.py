@@ -21,7 +21,13 @@ class AES67DaemonClient:
 
     async def upsert_sink(self, payload: Dict[str, Any]) -> None:
         url = f"{self.base_url}/api/sink/{self.sink_id}"
-        LOGGER.info("Configuring aes67 sink %s via %s", self.sink_id, url)
+        LOGGER.info(
+            "Configuring aes67 sink %s via %s (use_sdp=%s map=%s)",
+            self.sink_id,
+            url,
+            payload.get("use_sdp"),
+            payload.get("map"),
+        )
         async with self._lock:
             response = await self._client.put(url, json=payload)
             response.raise_for_status()

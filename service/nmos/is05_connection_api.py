@@ -37,7 +37,7 @@ class TransportParams(BaseModel):
     interface_ip: IPvAnyAddress | None = None
     ttl: int = Field(64, ge=1, le=255)
     sample_rate: int = Field(48000, ge=8000, le=192000)
-    encoding_name: str = Field("L16")
+    encoding_name: str = Field("L24")
     payload_type: int = Field(96, ge=0, le=127)
 
 
@@ -47,7 +47,7 @@ def _default_transport_params() -> TransportParams:
         destination_port=5004,
         ttl=64,
         sample_rate=48000,
-        encoding_name="L16",
+        encoding_name="L24",
         payload_type=96,
     )
 
@@ -169,7 +169,7 @@ def build_router(
         return {
             "sample_rates": [48000],
             "channels": [1],
-            "encodings": ["L16"],
+            "encodings": ["L24"],
             "destination_modes": ["multicast", "unicast"],
         }
 
@@ -209,19 +209,29 @@ def build_router(
         state = await controller.snapshot()
         staged = state.staged
         if not staged.master_enable:
+            LOGGER.info("Deactivating receiver (master_enable=false): deleting sink and stopping alsaloop")
             await daemon_client.delete_sink()
             await alsaloop.stop()
             await controller.commit_activation(False)
             return {"state": "disconnected"}
 
         params = staged.transport_params[0]
-        sdp = SDPBuilder.build(params, config.receiver_friendly_name)
+        LOGGER.info(
+            "Activating receiver: enable=%s dest=%s:%s encoding=%s/%s",
+            staged.master_enable,
+            params.destination_ip,
+            params.destination_port,
+            params.encoding_name,
+            params.sample_rate,
+        )
+        sdp = SDPBuilder.build(params, config.node_friendly_name)
         payload = {
             "use_sdp": True,
             "sdp": sdp,
             "map": [0, 0],  # duplicate mono channel on both playback legs
             "delay": 0,
         }
+        LOGGER.info("Applying sink payload to aes67-linux-daemon (sink=%s)", daemon_client.sink_id)
         await daemon_client.upsert_sink(payload)
         await alsaloop.ensure_running()
         await amixer.set_volume(staged.audio.volume)

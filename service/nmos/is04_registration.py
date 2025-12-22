@@ -192,7 +192,7 @@ class IS04RegistrationWorker:
             "id": self._identity.node_id,
             "version": version,
             "label": self._config.node_friendly_name,
-            "description": f"AES67 receiver on {hostname}",
+            "description": f"AES67 receiver on {api_host}",
             "tags": {},
             "href": href,
             "api": {
@@ -217,7 +217,7 @@ class IS04RegistrationWorker:
                     "port_id": port_id,
                 }
             ],
-            "hostname": hostname,
+            "hostname": api_host,
         }
         return node
 
@@ -225,7 +225,7 @@ class IS04RegistrationWorker:
         return {
             "id": self._identity.device_id,
             "version": version,
-            "label": self._config.device_friendly_name,
+            "label": self._config.node_friendly_name,
             "description": "AES67 mono receiver device",
             "type": "urn:x-nmos:device:generic",
             "node_id": self._identity.node_id,
@@ -240,11 +240,11 @@ class IS04RegistrationWorker:
         return {
             "id": self._identity.receiver_id,
             "version": version,
-            "label": self._config.receiver_friendly_name,
+            "label": self._config.node_friendly_name,
             "description": "Mono AES67 RTP receiver",
             "format": "urn:x-nmos:format:audio",
             "caps": {
-                "media_types": ["audio/L16"],
+                "media_types": ["audio/L24"],
             },
             "transport": "urn:x-nmos:transport:rtp.mcast",
             "device_id": self._identity.device_id,
@@ -268,8 +268,29 @@ class IS04RegistrationWorker:
 
     async def stop(self) -> None:
         self._stop.set()
+        if self._registered:
+            with suppress(Exception):
+                await self._delete_resources()
         with suppress(asyncio.CancelledError):
             await self._client.aclose()
+
+    async def _delete_resources(self) -> None:
+        if not self._registry:
+            return
+
+        await self._delete_resource("receivers", self._identity.receiver_id)
+        await self._delete_resource("devices", self._identity.device_id)
+        await self._delete_resource("nodes", self._identity.node_id)
+        self._registered = False
+
+    async def _delete_resource(self, collection: str, resource_id: str) -> None:
+        if not self._registry:
+            return
+        resource_type = collection[:-1]
+        url = f"{self._registry.url}/resource/{resource_type}/{resource_id}"
+        response = await self._client.delete(url)
+        if response.status_code not in (200, 204, 404):
+            response.raise_for_status()
 
 
 def _service_info_to_endpoint(info: Any) -> RegistryEndpoint:
