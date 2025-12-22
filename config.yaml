@@ -12,5 +12,7 @@ audio:
   playback_device: "hw:1,0" # headphone out on the SBC
   alsaloop_buffer_ms: 20
   amixer_card: "1"
-  amixer_control: "Headphone"
+  amixer_controls:
+    - "DAC LEFT LINEOUT"
+    - "DAC RIGHT LINEOUT"
   default_volume: 40

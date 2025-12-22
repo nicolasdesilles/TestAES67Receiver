@@ -52,7 +52,9 @@ audio:
   playback_device: "hw:1,0" # headphone out on the SBC
   alsaloop_buffer_ms: 50
   amixer_card: "1"
-  amixer_control: "Headphone"
+  amixer_controls:
+    - "DAC LEFT LINEOUT"
+    - "DAC RIGHT LINEOUT"
   default_volume: 80
 ```
 
@@ -86,7 +88,7 @@ pip install -e .
 3. **Configure**
 
 - Copy the sample `config.yaml` above, adjust ALSA card indices (`aplay -l`, `arecord -l` outputs) and registry URLs.
-- Verify `alsaloop` can open `hw:2,0 → hw:1,0` and `amixer -c 1 scontrols` lists the requested mixer control.
+- Verify `alsaloop` can open `hw:2,0 → hw:1,0` and `amixer -c 1 scontrols` lists both mixer controls.
 
 4. **Run service**
 

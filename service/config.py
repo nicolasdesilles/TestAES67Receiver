@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 import yaml
-from pydantic import AnyHttpUrl, BaseModel, Field
+from pydantic import AliasChoices, AnyHttpUrl, BaseModel, Field, field_validator
 
 from service.storage.json_store import JsonStateStore
 
@@ -32,6 +32,7 @@ class RegistryConfig(BaseModel):
 
 
 _DEFAULT_DAEMON_URL = cast(AnyHttpUrl, "http://127.0.0.1:8080")
+DEFAULT_MIXER_CONTROLS = ["DAC LEFT LINEOUT", "DAC RIGHT LINEOUT"]
 
 
 class DaemonConfig(BaseModel):
@@ -47,8 +48,23 @@ class AudioConfig(BaseModel):
     playback_device: str = Field("hw:1,0", description="ALSA playback device (headphone jack)")
     alsaloop_buffer_ms: int = Field(50, ge=10, le=500, description="alsaloop latency buffer in milliseconds")
     amixer_card: str = Field("1", description="amixer -c <card> target")
-    amixer_control: str = Field("Headphone", description="Mixer control name for volume/mute")
+    amixer_controls: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_MIXER_CONTROLS),
+        validation_alias=AliasChoices("amixer_controls", "amixer_control"),
+        description="Mixer control names for volume/mute (each control is updated in sequence)",
+    )
     default_volume: int = Field(80, ge=0, le=100)
+
+    @field_validator("amixer_controls", mode="before")
+    @classmethod
+    def _coerce_controls(cls, value: object) -> list[str]:
+        if value is None:
+            return list(DEFAULT_MIXER_CONTROLS)
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item) for item in value]
+        return list(DEFAULT_MIXER_CONTROLS)
 
 
 def _default_registry_config() -> RegistryConfig:
@@ -71,7 +87,7 @@ def _default_audio_config() -> AudioConfig:
         playback_device="hw:1,0",
         alsaloop_buffer_ms=50,
         amixer_card="1",
-        amixer_control="Headphone",
+        amixer_controls=list(DEFAULT_MIXER_CONTROLS),
         default_volume=80,
     )
 

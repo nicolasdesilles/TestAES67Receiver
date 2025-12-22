@@ -32,7 +32,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         playback_device=config.audio.playback_device,
         buffer_ms=config.audio.alsaloop_buffer_ms,
     )
-    amixer = AmixerController(config.audio.amixer_card, config.audio.amixer_control)
+    amixer = AmixerController(config.audio.amixer_card, config.audio.amixer_controls)
 
     router = build_router(config, state_store, daemon_client, alsaloop, amixer)
     is04_worker = IS04RegistrationWorker(config, identity, state_store)

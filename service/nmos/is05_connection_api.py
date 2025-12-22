@@ -219,7 +219,7 @@ def build_router(
         payload = {
             "use_sdp": True,
             "sdp": sdp,
-            "map": [0],
+            "map": [0, 0],  # duplicate mono channel on both playback legs
             "delay": 0,
         }
         await daemon_client.upsert_sink(payload)
