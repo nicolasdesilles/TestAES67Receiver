@@ -7,7 +7,7 @@ registry:
     - "http://nmos-registry.local/x-nmos/registration/v1.3"
   heartbeat_interval: 5
 daemon:
-  base_url: "http://127.0.0.1:8080"
+  base_url: "http://192.168.12.111:8080"
   sink_id: 0
 audio:
   capture_device: "hw:2,0" # aes67-linux-daemon capture side

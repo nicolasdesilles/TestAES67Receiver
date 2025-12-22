@@ -23,6 +23,14 @@ logging.basicConfig(level=logging.INFO)
 
 def create_app(config_path: str | Path | None = None) -> FastAPI:
     config: AppConfig = load_config(config_path)
+    LOGGER.info(
+        "Config loaded: daemon.base_url=%s sink_id=%s poll=%ss interface=%s http_port=%s",
+        config.daemon.base_url,
+        config.daemon.sink_id,
+        config.daemon.status_poll_interval,
+        config.interface_name,
+        config.http_port,
+    )
     state_store = JsonStateStore(config.state_file)
     identity = ensure_identity(state_store)
 
@@ -55,7 +63,12 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             except Exception as exc:
                 consecutive_failures += 1
                 if consecutive_failures in (1, 5, 20):
-                    LOGGER.warning("aes67-linux-daemon status poll failed (%s): %s", consecutive_failures, exc)
+                    LOGGER.warning(
+                        "aes67-linux-daemon status poll failed (%s) for base_url=%s: %s",
+                        consecutive_failures,
+                        daemon_client.base_url,
+                        exc,
+                    )
             await asyncio.sleep(config.daemon.status_poll_interval)
 
     @asynccontextmanager

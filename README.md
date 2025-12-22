@@ -47,7 +47,7 @@ registry:
     - "http://registry.local:3210/x-nmos/registration/v1.3"
   heartbeat_interval: 5
 daemon:
-  base_url: "http://127.0.0.1:8080"
+  base_url: "http://127.0.0.1:8080" # must match where aes67-linux-daemon listens (often "http://<sbc-ip>:8080")
   sink_id: 0
 audio:
   capture_device: "hw:2,0" # aes67-linux-daemon capture side
@@ -74,7 +74,9 @@ sudo apt update
 sudo apt install -y python3-venv python3-pip alsa-utils alsa-loopback
 ```
 
-Ensure `aes67-linux-daemon` is already installed and reachable at `http://127.0.0.1:8080`.
+Ensure `aes67-linux-daemon` is already installed and reachable at the configured `daemon.base_url`.
+
+Tip: on the SBC, confirm which address the daemon is bound to using `ss -ltnp | grep ':8080'`. If it listens on the LAN IP (e.g. `192.168.x.y:8080`) and not on `127.0.0.1:8080`, set `daemon.base_url: "http://192.168.x.y:8080"` in `config.yaml`.
 
 2. **Clone + install**
 
