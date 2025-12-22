@@ -91,7 +91,7 @@ class ReceiverStateController:
             staged = StagedState(audio=AudioParams(volume=self._default_volume))
             active = StagedState(**staged.model_dump())
             receiver_state = ReceiverState(staged=staged, active=active, sink_active=False)
-            self._store.write_namespace(STATE_NAMESPACE, receiver_state.model_dump())
+            self._store.write_namespace(STATE_NAMESPACE, receiver_state.model_dump(mode="json"))
             return receiver_state
         return ReceiverState(**payload)
 
@@ -117,7 +117,7 @@ class ReceiverStateController:
             return ReceiverState(**self._state.model_dump())
 
     async def _persist(self) -> None:
-        self._store.write_namespace(STATE_NAMESPACE, self._state.model_dump())
+        self._store.write_namespace(STATE_NAMESPACE, self._state.model_dump(mode="json"))
 
 
 class SDPBuilder:
