@@ -1,0 +1,51 @@
+Metadata-Version: 2.4
+Name: aes67-nmos-wrapper
+Version: 0.1.0
+Summary: NMOS IS-04/IS-05 wrapper for aes67-linux-daemon receivers
+Author: Nicolas
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.111
+Requires-Dist: uvicorn[standard]>=0.30
+Requires-Dist: httpx>=0.27
+Requires-Dist: pydantic>=2.7
+Requires-Dist: zeroconf>=0.130
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: ruff>=0.6; extra == "dev"
+Requires-Dist: pytest>=8.3; extra == "dev"
+
+# AES67 NMOS Wrapper
+
+Python-based microservice that registers a mono AES67 receiver with an NMOS IS-04 registry, exposes the IS-05 single receiver API, and controls a local `aes67-linux-daemon` sink plus ALSA plumbing on an Armbian SBC.
+
+## Features (planned)
+
+- Registry discovery via DNS-SD (`_nmos-registration._tcp`) with configurable static fallback list.
+- IS-04 Node/Device/Receiver registration for versions v1.1–v1.3, including heartbeats and re-registration.
+- IS-05 `/constraints`, `/transporttype`, `/staged`, `/active` endpoints for a single receiver, translating activations into daemon sink changes.
+- ALSA routing (card2 capture → card1 playback) managed with `alsaloop`, plus volume/mute via `amixer`.
+- JSON state persistence to survive reboots (UUIDs, staged params, audio settings).
+
+## Repository Layout
+
+```
+service/
+  main.py                 # Entrypoint for FastAPI app and worker tasks
+  config.py               # Configuration models + discovery settings
+  storage/json_store.py   # Lightweight JSON persistence utilities
+  nmos/
+    is04_registration.py  # Registration + heartbeat worker
+    is05_connection_api.py# IS-05 REST resources + validation
+  daemon/
+    aes67d_client.py      # HTTP client for aes67-linux-daemon
+  audio/
+    alsaloop.py           # ALSA loopback process control
+    amixer_control.py     # Volume/mute helpers
+```
+
+## Development Notes
+
+- Target runtime: Python 3.10+ (tested on macOS dev, deployed on Armbian SBC).
+- Install dependencies with `uv pip install -r requirements.txt` or `pip install -e .` once virtual environment is prepared.
+- Run the API locally via `uvicorn service.main:app --reload` (macOS) for integration testing against mocked daemon endpoints and your NMOS registry.

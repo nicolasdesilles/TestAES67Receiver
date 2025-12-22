@@ -1,0 +1,16 @@
+node_friendly_name: "akM Receiver 02"
+registry:
+  mode: dns-sd # auto-discover `_nmos-registration._tcp`
+  static_urls: # optional fallbacks if discovery fails
+    - "http://nmos-registry.local/x-nmos/registration/v1.3"
+  heartbeat_interval: 5
+daemon:
+  base_url: "http://127.0.0.1:8080"
+  sink_id: 0
+audio:
+  capture_device: "hw:2,0" # aes67-linux-daemon capture side
+  playback_device: "hw:1,0" # headphone out on the SBC
+  alsaloop_buffer_ms: 20
+  amixer_card: "1"
+  amixer_control: "Headphone"
+  default_volume: 40
