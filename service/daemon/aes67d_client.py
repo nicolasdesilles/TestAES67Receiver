@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import httpx
 
@@ -40,8 +40,32 @@ class AES67DaemonClient:
             if response.status_code not in (200, 204, 404):
                 response.raise_for_status()
 
-    async def fetch_status(self) -> Dict[str, Any]:
+    async def list_sinks(self) -> dict[str, Any]:
+        url = f"{self.base_url}/api/sinks"
+        async with self._lock:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            return response.json()
+
+    async def fetch_sink_status(self) -> Dict[str, Any] | None:
         url = f"{self.base_url}/api/sink/status/{self.sink_id}"
+        async with self._lock:
+            response = await self._client.get(url)
+            if response.status_code in (400, 404):
+                # Common before any activation: sink not configured yet.
+                return None
+            response.raise_for_status()
+            return response.json()
+
+    async def fetch_config(self) -> dict[str, Any]:
+        url = f"{self.base_url}/api/config"
+        async with self._lock:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            return response.json()
+
+    async def fetch_ptp_status(self) -> dict[str, Any]:
+        url = f"{self.base_url}/api/ptp/status"
         async with self._lock:
             response = await self._client.get(url)
             response.raise_for_status()

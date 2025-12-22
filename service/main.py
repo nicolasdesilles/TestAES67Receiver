@@ -47,14 +47,38 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
 
     async def daemon_monitor() -> None:
         last_flags: dict[str, object] | None = None
+        last_ptp: dict[str, object] | None = None
+        sink_present: bool | None = None
         consecutive_failures = 0
         while True:
             try:
-                status = await daemon_client.fetch_status()
-                flags = status.get("sink_flags", {}) if isinstance(status, dict) else {}
-                if flags != last_flags:
-                    LOGGER.info("aes67-linux-daemon status changed: %s", flags)
-                    last_flags = dict(flags) if isinstance(flags, dict) else {"raw": flags}
+                sinks = await daemon_client.list_sinks()
+                sink_ids = {
+                    int(item.get("id"))
+                    for item in sinks.get("sinks", [])
+                    if isinstance(item, dict) and isinstance(item.get("id"), int)
+                }
+                now_present = daemon_client.sink_id in sink_ids
+                if now_present != sink_present:
+                    sink_present = now_present
+                    if sink_present:
+                        LOGGER.info("aes67-linux-daemon sink %s is present", daemon_client.sink_id)
+                    else:
+                        LOGGER.info("aes67-linux-daemon sink %s is not configured yet", daemon_client.sink_id)
+                        last_flags = None
+
+                if sink_present:
+                    status = await daemon_client.fetch_sink_status()
+                    flags = (status or {}).get("sink_flags", {}) if isinstance(status, dict) or status is None else {}
+                    if flags != last_flags:
+                        LOGGER.info("aes67-linux-daemon sink_flags changed: %s", flags)
+                        last_flags = dict(flags) if isinstance(flags, dict) else {"raw": flags}
+
+                ptp = await daemon_client.fetch_ptp_status()
+                if ptp != last_ptp:
+                    LOGGER.info("aes67-linux-daemon PTP status changed: %s", ptp)
+                    last_ptp = dict(ptp) if isinstance(ptp, dict) else {"raw": ptp}
+
                 if consecutive_failures:
                     LOGGER.info("aes67-linux-daemon status poll recovered")
                     consecutive_failures = 0
