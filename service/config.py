@@ -96,6 +96,16 @@ class AppConfig(BaseModel):
     node_friendly_name: str = Field("AES67 Receiver", description="Human-readable Node label")
     device_friendly_name: str = Field("AES67 Device", description="Human-readable Device label")
     receiver_friendly_name: str = Field("AES67 Mono Receiver", description="Receiver label")
+    interface_name: str | None = Field(
+        default=None,
+        description="Network interface name to bind in IS-04/IS-05 resources (e.g. 'end1'). If unset, auto-detected.",
+    )
+    http_port: int = Field(
+        8000,
+        ge=1,
+        le=65535,
+        description="TCP port this wrapper serves on (used in IS-04 Node.api endpoints advertisement)",
+    )
     registry: RegistryConfig = Field(default_factory=_default_registry_config)
     daemon: DaemonConfig = Field(default_factory=_default_daemon_config)
     audio: AudioConfig = Field(default_factory=_default_audio_config)

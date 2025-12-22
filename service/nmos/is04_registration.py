@@ -4,7 +4,11 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import os
+import re
 import socket
+import time
+from urllib.parse import urlparse
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -121,7 +125,7 @@ class IS04RegistrationWorker:
     async def _register_resources(self) -> None:
         if not self._registry:
             return
-        version = _utc_version()
+        version = _tai_version()
         node = self._build_node_resource(version)
         device = self._build_device_resource(version)
         receiver = self._build_receiver_resource(version)
@@ -130,6 +134,10 @@ class IS04RegistrationWorker:
             await self._upsert_resource("nodes", self._identity.node_id, node)
             await self._upsert_resource("devices", self._identity.device_id, device)
             await self._upsert_resource("receivers", self._identity.receiver_id, receiver)
+        except httpx.HTTPStatusError as exc:
+            details = exc.response.text
+            LOGGER.warning("Failed to register resources: %s; response=%s", exc, details)
+            return
         except httpx.HTTPError as exc:
             LOGGER.warning("Failed to register resources: %s", exc)
             return
@@ -172,21 +180,41 @@ class IS04RegistrationWorker:
 
     def _build_node_resource(self, version: str) -> Dict[str, Any]:
         hostname = _hostname()
+        interface_name = _detect_primary_interface(self._config.interface_name)
+        port_id = _read_interface_mac(interface_name)
+        chassis_id = None
+        # Advertise the FastAPI host/port as a basic Node API endpoint.
+        api_host = _detect_advertise_ip(self._registry.url) if self._registry else hostname
+        api_port = int(os.environ.get("AES67_NMOS_HTTP_PORT", str(self._config.http_port)))
+        node_api_versions = ["v1.3", "v1.2", "v1.1"]
+        href = f"http://{api_host}:{api_port}/x-nmos/node/v1.3"
         node = {
             "id": self._identity.node_id,
             "version": version,
             "label": self._config.node_friendly_name,
             "description": f"AES67 receiver on {hostname}",
             "tags": {},
+            "href": href,
+            "api": {
+                "versions": node_api_versions,
+                "endpoints": [
+                    {
+                        "host": api_host,
+                        "port": api_port,
+                        "protocol": "http",
+                        "authorization": False,
+                    }
+                ],
+            },
             "services": [],
             "controls": [],
             "caps": {},
+            "clocks": [],
             "interfaces": [
                 {
-                    "name": "eth0",
-                    "chassis_id": hostname,
-                    "port_id": "eth0",
-                    "vlan_ids": [],
+                    "name": interface_name,
+                    "chassis_id": chassis_id,
+                    "port_id": port_id,
                 }
             ],
             "hostname": hostname,
@@ -208,17 +236,20 @@ class IS04RegistrationWorker:
         }
 
     def _build_receiver_resource(self, version: str) -> Dict[str, Any]:
+        interface_name = _detect_primary_interface(self._config.interface_name)
         return {
             "id": self._identity.receiver_id,
             "version": version,
             "label": self._config.receiver_friendly_name,
             "description": "Mono AES67 RTP receiver",
             "format": "urn:x-nmos:format:audio",
-            "transport": "urn:x-nmos:transport:rtp",
+            "caps": {
+                "media_types": ["audio/L16"],
+            },
+            "transport": "urn:x-nmos:transport:rtp.mcast",
             "device_id": self._identity.device_id,
-            "caps": {},
             "subscription": {"sender_id": None, "active": False},
-            "interface_bindings": ["eth0"],
+            "interface_bindings": [interface_name],
             "tags": {},
         }
 
@@ -256,8 +287,84 @@ def _utc_version() -> str:
     return dt.datetime.utcnow().isoformat() + "Z"
 
 
+def _tai_version() -> str:
+    """Return an IS-04 version string matching the required pattern ^[0-9]+:[0-9]+$.
+
+    The spec describes this as a TAI timestamp. Many registries validate only the format,
+    not absolute epoch correctness, so we use Unix time with nanoseconds for now.
+    """
+
+    ns = time.time_ns()
+    seconds = ns // 1_000_000_000
+    nanos = ns % 1_000_000_000
+    return f"{seconds}:{nanos}"
+
+
 def _hostname() -> str:
     try:
         return socket.gethostname()
     except Exception:  # pragma: no cover - fallback
         return "aes67-node"
+
+
+def _detect_advertise_ip(registry_url: str) -> str:
+    """Best-effort selection of an IP address to advertise in Node.api.endpoints.
+
+    Strategy: open a UDP socket towards the registry host and use the chosen source IP.
+    """
+
+    try:
+        parsed = urlparse(registry_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            return socket.gethostbyname(_hostname())
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect((host, port))
+            return sock.getsockname()[0]
+        finally:
+            sock.close()
+    except Exception:  # pragma: no cover
+        return "127.0.0.1"
+
+
+def _detect_primary_interface(preferred: str | None) -> str:
+    """Choose an interface name to report in Node.interfaces.
+
+    Prefer the first non-loopback interface that is 'up'. Fallback to 'eth0'.
+    """
+
+    if preferred:
+        return preferred
+
+    sys_net = "/sys/class/net"
+    try:
+        candidates = []
+        for name in os.listdir(sys_net):
+            if name == "lo":
+                continue
+            operstate_path = os.path.join(sys_net, name, "operstate")
+            try:
+                operstate = open(operstate_path, "r", encoding="utf-8").read().strip()
+            except OSError:
+                operstate = "unknown"
+            candidates.append((0 if operstate == "up" else 1, name))
+        candidates.sort()
+        return candidates[0][1] if candidates else "eth0"
+    except Exception:  # pragma: no cover
+        return "eth0"
+
+
+def _read_interface_mac(interface_name: str) -> str:
+    """Return MAC address formatted with '-' separators (schema requirement)."""
+
+    try:
+        mac = open(f"/sys/class/net/{interface_name}/address", "r", encoding="utf-8").read().strip().lower()
+        mac = mac.replace(":", "-")
+        if re.match(r"^([0-9a-f]{2}-){5}([0-9a-f]{2})$", mac):
+            return mac
+    except OSError:
+        pass
+    # Fallback: schema requires MAC, so use a deterministic placeholder if unavailable
+    return "00-00-00-00-00-00"

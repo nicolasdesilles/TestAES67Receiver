@@ -39,6 +39,8 @@ Create a `config.yaml` beside `pyproject.toml` to override defaults. Example:
 
 ```yaml
 node_friendly_name: "Studio Receiver 01"
+interface_name: "end1" # network interface to bind in NMOS resources
+http_port: 8000 # wrapper listen port advertised in IS-04
 registry:
   mode: dns-sd # auto-discover `_nmos-registration._tcp`
   static_urls: # optional fallbacks if discovery fails
