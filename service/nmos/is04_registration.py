@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
+import socket
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -35,6 +37,7 @@ class IS04RegistrationWorker:
         self._client = httpx.AsyncClient(timeout=5.0)
         self._stop = asyncio.Event()
         self._registry: RegistryEndpoint | None = None
+        self._registered = False
 
     async def run(self) -> None:
         LOGGER.info("IS-04 worker started (%s)", self._config.describe_discovery())
@@ -60,6 +63,10 @@ class IS04RegistrationWorker:
                 LOGGER.debug("No registry discovered yet")
                 return
             LOGGER.info("Using registry %s", self._registry.url)
+            self._registered = False
+        if not self._registered:
+            await self._register_resources()
+            return
         await self._send_heartbeat()
 
     async def _discover_registry(self) -> RegistryEndpoint | None:
@@ -111,6 +118,101 @@ class IS04RegistrationWorker:
             browser.cancel()
             zeroconf.close()
 
+    async def _register_resources(self) -> None:
+        if not self._registry:
+            return
+        version = _utc_version()
+        node = self._build_node_resource(version)
+        device = self._build_device_resource(version)
+        receiver = self._build_receiver_resource(version)
+
+        try:
+            await self._upsert_resource("nodes", self._identity.node_id, node)
+            await self._upsert_resource("devices", self._identity.device_id, device)
+            await self._upsert_resource("receivers", self._identity.receiver_id, receiver)
+        except httpx.HTTPError as exc:
+            LOGGER.warning("Failed to register resources: %s", exc)
+            return
+        self._registered = True
+        LOGGER.info(
+            "Registered Node %s / Device %s / Receiver %s",
+            self._identity.node_id,
+            self._identity.device_id,
+            self._identity.receiver_id,
+        )
+
+    async def _upsert_resource(self, collection: str, resource_id: str, payload: Dict[str, Any]) -> None:
+        if not self._registry:
+            return
+        url = f"{self._registry.url}/resource/{collection}"
+        envelope = {
+            "type": collection[:-1],
+            "id": resource_id,
+            "data": payload,
+        }
+        response = await self._client.post(url, json=envelope)
+        if response.status_code in (200, 201, 202):
+            return
+        if response.status_code == 409:
+            LOGGER.info("Resource %s already registered, updating", resource_id)
+            url = f"{self._registry.url}/resource/{collection}/{resource_id}"
+            response = await self._client.put(url, json=envelope)
+            response.raise_for_status()
+            return
+        response.raise_for_status()
+
+    def _build_node_resource(self, version: str) -> Dict[str, Any]:
+        hostname = _hostname()
+        node = {
+            "id": self._identity.node_id,
+            "version": version,
+            "label": self._config.node_friendly_name,
+            "description": f"AES67 receiver on {hostname}",
+            "tags": {},
+            "services": [],
+            "controls": [],
+            "caps": {},
+            "interfaces": [
+                {
+                    "name": "eth0",
+                    "chassis_id": hostname,
+                    "port_id": "eth0",
+                    "vlan_ids": [],
+                }
+            ],
+            "hostname": hostname,
+        }
+        return node
+
+    def _build_device_resource(self, version: str) -> Dict[str, Any]:
+        return {
+            "id": self._identity.device_id,
+            "version": version,
+            "label": self._config.device_friendly_name,
+            "description": "AES67 mono receiver device",
+            "type": "urn:x-nmos:device:generic",
+            "node_id": self._identity.node_id,
+            "controls": [],
+            "receivers": [self._identity.receiver_id],
+            "senders": [],
+            "tags": {},
+        }
+
+    def _build_receiver_resource(self, version: str) -> Dict[str, Any]:
+        return {
+            "id": self._identity.receiver_id,
+            "version": version,
+            "label": self._config.receiver_friendly_name,
+            "description": "Mono AES67 RTP receiver",
+            "format": "urn:x-nmos:format:audio",
+            "transport": "urn:x-nmos:transport:rtp",
+            "device_id": self._identity.device_id,
+            "caps": {},
+            "subscription": {"sender_id": None, "active": False},
+            "interface_bindings": ["eth0"],
+            "tags": {},
+        }
+
     async def _send_heartbeat(self) -> None:
         if not self._registry:
             return
@@ -120,6 +222,7 @@ class IS04RegistrationWorker:
         if response.status_code == 404:
             LOGGER.info("Registry lost our Node; re-registering soon")
             self._registry = None
+            self._registered = False
             return
         response.raise_for_status()
 
@@ -138,3 +241,14 @@ def _service_info_to_endpoint(info: Any) -> RegistryEndpoint:
     version = "v1.3"  # default assumption; controllers may redirect if needed
     url = f"http://{address}:{port}/x-nmos/registration/{version}"
     return RegistryEndpoint(url=url)
+
+
+def _utc_version() -> str:
+    return dt.datetime.utcnow().isoformat() + "Z"
+
+
+def _hostname() -> str:
+    try:
+        return socket.gethostname()
+    except Exception:  # pragma: no cover - fallback
+        return "aes67-node"
