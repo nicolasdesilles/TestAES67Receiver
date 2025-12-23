@@ -8,16 +8,22 @@ from ipaddress import IPv4Address
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, IPvAnyAddress
 
 from service.audio.amixer_control import AmixerController
 from service.audio.alsaloop import AlsaLoopController
-from service.config import AppConfig, SUPPORTED_CONNECTION_VERSIONS
+from service.config import AppConfig, SUPPORTED_CONNECTION_API_VERSIONS
 from service.daemon.aes67d_client import AES67DaemonClient
 from service.storage.json_store import JsonStateStore
 
 LOGGER = logging.getLogger(__name__)
 STATE_NAMESPACE = "receiver_state"
+
+
+def _error_response(code: int, error: str, debug: str | None = None) -> JSONResponse:
+    # IS-05 error schema matches the common NMOS error shape.
+    return JSONResponse(status_code=code, content={"code": code, "error": error, "debug": debug})
 
 
 class ActivationParams(BaseModel):
@@ -145,14 +151,88 @@ def build_router(
     controller = ReceiverStateController(store, config.audio.default_volume)
     router = APIRouter()
 
+    def _stable_receiver_id() -> str:
+        return store.get_or_create_uuid("receiver_id")
+
     async def validate_version(version: str = Path(..., description="IS-05 version")) -> str:
-        if version not in SUPPORTED_CONNECTION_VERSIONS:
+        if version not in SUPPORTED_CONNECTION_API_VERSIONS:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unsupported IS-05 version")
         return version
 
     async def ensure_receiver(receiver_id: str = Path(...)) -> str:
-        # Single receiver implementation; identity ensured elsewhere
+        # Single receiver implementation; only expose the persisted receiver UUID.
+        if receiver_id != _stable_receiver_id():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown receiver")
         return receiver_id
+
+    # --- Base traversal endpoints (required for spec compliance) ---
+
+    @router.get("/x-nmos/connection/{version}")
+    @router.get("/x-nmos/connection/{version}/")
+    async def get_base(version: str = Depends(validate_version)) -> list[str]:
+        return ["bulk/", "single/"]
+
+    @router.get("/x-nmos/connection/{version}/bulk")
+    @router.get("/x-nmos/connection/{version}/bulk/")
+    async def get_bulk_base(version: str = Depends(validate_version)) -> list[str]:
+        return ["senders/", "receivers/"]
+
+    @router.get("/x-nmos/connection/{version}/single")
+    @router.get("/x-nmos/connection/{version}/single/")
+    async def get_single_base(version: str = Depends(validate_version)) -> list[str]:
+        return ["senders/", "receivers/"]
+
+    @router.get("/x-nmos/connection/{version}/single/senders")
+    @router.get("/x-nmos/connection/{version}/single/senders/")
+    async def list_single_senders(version: str = Depends(validate_version)) -> list[str]:
+        # This node exposes no senders.
+        return []
+
+    @router.get("/x-nmos/connection/{version}/single/receivers")
+    @router.get("/x-nmos/connection/{version}/single/receivers/")
+    async def list_single_receivers(version: str = Depends(validate_version)) -> list[str]:
+        # IS-05 list endpoints return UUIDs with trailing '/' to indicate URL continuation.
+        return [f"{_stable_receiver_id()}/"]
+
+    @router.get("/x-nmos/connection/{version}/single/receivers/{receiver_id}")
+    @router.get("/x-nmos/connection/{version}/single/receivers/{receiver_id}/")
+    async def get_single_receiver_base(
+        version: str = Depends(validate_version),
+        receiver_id: str = Depends(ensure_receiver),
+    ) -> list[str]:
+        # Per connectionapi-receiver.json
+        return ["constraints/", "staged/", "active/", "transporttype/"]
+
+    # Minimal /bulk skeleton (we don't implement bulk operations; return required status codes)
+    @router.get("/x-nmos/connection/{version}/bulk/senders")
+    @router.get("/x-nmos/connection/{version}/bulk/senders/")
+    async def bulk_senders_get(version: str = Depends(validate_version)) -> JSONResponse:
+        return _error_response(status.HTTP_405_METHOD_NOT_ALLOWED, "GET not permitted on bulk senders")
+
+    @router.options("/x-nmos/connection/{version}/bulk/senders")
+    @router.options("/x-nmos/connection/{version}/bulk/senders/")
+    async def bulk_senders_options(version: str = Depends(validate_version)) -> JSONResponse:
+        return JSONResponse(status_code=status.HTTP_200_OK, content={})
+
+    @router.post("/x-nmos/connection/{version}/bulk/senders")
+    @router.post("/x-nmos/connection/{version}/bulk/senders/")
+    async def bulk_senders_post(version: str = Depends(validate_version)) -> JSONResponse:
+        return _error_response(status.HTTP_501_NOT_IMPLEMENTED, "Bulk sender control is not implemented")
+
+    @router.get("/x-nmos/connection/{version}/bulk/receivers")
+    @router.get("/x-nmos/connection/{version}/bulk/receivers/")
+    async def bulk_receivers_get(version: str = Depends(validate_version)) -> JSONResponse:
+        return _error_response(status.HTTP_405_METHOD_NOT_ALLOWED, "GET not permitted on bulk receivers")
+
+    @router.options("/x-nmos/connection/{version}/bulk/receivers")
+    @router.options("/x-nmos/connection/{version}/bulk/receivers/")
+    async def bulk_receivers_options(version: str = Depends(validate_version)) -> JSONResponse:
+        return JSONResponse(status_code=status.HTTP_200_OK, content={})
+
+    @router.post("/x-nmos/connection/{version}/bulk/receivers")
+    @router.post("/x-nmos/connection/{version}/bulk/receivers/")
+    async def bulk_receivers_post(version: str = Depends(validate_version)) -> JSONResponse:
+        return _error_response(status.HTTP_501_NOT_IMPLEMENTED, "Bulk receiver control is not implemented")
 
     @router.get("/x-nmos/connection/{version}/single/receivers/{receiver_id}/transporttype")
     async def get_transport_type(

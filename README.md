@@ -127,3 +127,48 @@ Reload systemd (`sudo systemctl daemon-reload`), enable (`sudo systemctl enable 
 - Use `curl http://localhost:8000/health/live` to check liveness.
 - Monitor `journalctl -u aes67-nmos.service -f` for registry heartbeats and activation events.
 - From a controller, PATCH the IS-05 `/staged` endpoint and activate to confirm `aes67-linux-daemon` sink 0 receives the generated SDP (`/api/sink/status/0`).
+
+## Wrapper HTTP API (port 8000)
+
+The wrapper exposes a small HTTP API (default port 8000):
+
+- Health
+  - `GET /health/live`
+  - `GET /health/ready`
+- NMOS IS-05 Connection API (single receiver)
+
+  - Base traversal
+    - `GET /x-nmos/connection/{version}`
+    - `GET /x-nmos/connection/{version}/single/receivers`
+    - `GET /x-nmos/connection/{version}/single/receivers/{receiver_id}`
+  - Single receiver control
+    - `GET /x-nmos/connection/{version}/single/receivers/{receiver_id}/transporttype`
+    - `GET /x-nmos/connection/{version}/single/receivers/{receiver_id}/constraints`
+    - `GET /x-nmos/connection/{version}/single/receivers/{receiver_id}/staged`
+    - `PATCH /x-nmos/connection/{version}/single/receivers/{receiver_id}/staged`
+    - `GET /x-nmos/connection/{version}/single/receivers/{receiver_id}/active`
+    - `POST /x-nmos/connection/{version}/single/receivers/{receiver_id}/staged/activation`
+
+- NMOS IS-04 Node API (read-only)
+  - Base traversal
+    - `GET /x-nmos/node/{version}/`
+    - `GET /x-nmos/node/{version}/self`
+  - Resources
+    - `GET /x-nmos/node/{version}/devices`
+    - `GET /x-nmos/node/{version}/devices/{device_id}`
+    - `GET /x-nmos/node/{version}/receivers`
+    - `GET /x-nmos/node/{version}/receivers/{receiver_id}`
+    - `OPTIONS /x-nmos/node/{version}/receivers/{receiver_id}/target`
+    - `PUT /x-nmos/node/{version}/receivers/{receiver_id}/target` (returns 501; deprecated in IS-04)
+    - `GET /x-nmos/node/{version}/senders` (empty)
+    - `GET /x-nmos/node/{version}/senders/{sender_id}` (404)
+    - `GET /x-nmos/node/{version}/sources` (empty)
+    - `GET /x-nmos/node/{version}/sources/{source_id}` (404)
+    - `GET /x-nmos/node/{version}/flows` (empty)
+    - `GET /x-nmos/node/{version}/flows/{flow_id}` (404)
+
+Notes:
+
+- IS-04 Node API `{version}` supports `v1.1`, `v1.2`, `v1.3`.
+- IS-05 Connection API `{version}` supports `v1.0`, `v1.1`.
+- `{receiver_id}` is the stable UUID persisted in `state/runtime.json` and registered in IS-04.

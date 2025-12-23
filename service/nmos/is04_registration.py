@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from service.config import AppConfig, NodeIdentity
+from service.config import AppConfig, NodeIdentity, SUPPORTED_CONNECTION_API_VERSIONS
 from service.storage.json_store import JsonStateStore
 
 LOGGER = logging.getLogger(__name__)
@@ -126,7 +126,9 @@ class IS04RegistrationWorker:
         if not self._registry:
             return
         version = _tai_version()
-        node = self._build_node_resource(version)
+        ptp_status = await self._fetch_ptp_status()
+        node_clock = _ptp_clock_from_status(ptp_status)
+        node = self._build_node_resource(version, node_clock)
         device = self._build_device_resource(version)
         receiver = self._build_receiver_resource(version)
 
@@ -178,7 +180,7 @@ class IS04RegistrationWorker:
 
         response.raise_for_status()
 
-    def _build_node_resource(self, version: str) -> Dict[str, Any]:
+    def _build_node_resource(self, version: str, clock: Dict[str, Any]) -> Dict[str, Any]:
         hostname = _hostname()
         interface_name = _detect_primary_interface(self._config.interface_name)
         port_id = _read_interface_mac(interface_name)
@@ -209,7 +211,7 @@ class IS04RegistrationWorker:
             "services": [],
             "controls": [],
             "caps": {},
-            "clocks": [],
+            "clocks": [clock],
             "interfaces": [
                 {
                     "name": interface_name,
@@ -221,7 +223,33 @@ class IS04RegistrationWorker:
         }
         return node
 
+    async def _fetch_ptp_status(self) -> dict[str, Any] | None:
+        """Best-effort read of the daemon PTP status for IS-04 clock declaration."""
+
+        url = f"{self._config.daemon.base_url}/api/ptp/status"
+        try:
+            response = await self._client.get(url)
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            return None
+        except Exception:
+            return None
+
     def _build_device_resource(self, version: str) -> Dict[str, Any]:
+        # Controllers discover the IS-05 Connection API via Device.controls
+        # (type urn:x-nmos:control:sr-ctrl/{version}).
+        api_host = _detect_advertise_ip(self._registry.url) if self._registry else _hostname()
+        api_port = int(os.environ.get("AES67_NMOS_HTTP_PORT", str(self._config.http_port)))
+        controls: list[Dict[str, Any]] = [
+            {
+                "href": f"http://{api_host}:{api_port}/x-nmos/connection/{conn_version}",
+                "type": f"urn:x-nmos:control:sr-ctrl/{conn_version}",
+            }
+            for conn_version in SUPPORTED_CONNECTION_API_VERSIONS
+        ]
         return {
             "id": self._identity.device_id,
             "version": version,
@@ -229,7 +257,7 @@ class IS04RegistrationWorker:
             "description": "AES67 mono receiver device",
             "type": "urn:x-nmos:device:generic",
             "node_id": self._identity.node_id,
-            "controls": [],
+            "controls": controls,
             "receivers": [self._identity.receiver_id],
             "senders": [],
             "tags": {},
@@ -389,3 +417,25 @@ def _read_interface_mac(interface_name: str) -> str:
         pass
     # Fallback: schema requires MAC, so use a deterministic placeholder if unavailable
     return "00-00-00-00-00-00"
+
+
+def _coerce_ptp_gmid(value: object) -> str:
+    if not isinstance(value, str):
+        return "00-00-00-00-00-00-00-00"
+    candidate = value.strip().lower()
+    if re.match(r"^([0-9a-f]{2}-){7}([0-9a-f]{2})$", candidate):
+        return candidate
+    return "00-00-00-00-00-00-00-00"
+
+
+def _ptp_clock_from_status(ptp_status: dict[str, Any] | None) -> Dict[str, Any]:
+    locked = bool(ptp_status and ptp_status.get("status") == "locked")
+    gmid = _coerce_ptp_gmid(ptp_status.get("gmid") if ptp_status else None)
+    return {
+        "name": "clk0",
+        "ref_type": "ptp",
+        "traceable": locked,
+        "version": "IEEE1588-2008",
+        "gmid": gmid,
+        "locked": locked,
+    }

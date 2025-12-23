@@ -12,7 +12,15 @@ from pydantic import AliasChoices, AnyHttpUrl, BaseModel, Field, field_validator
 from service.storage.json_store import JsonStateStore
 
 DEFAULT_CONFIG_PATH = Path(os.environ.get("AES67_NMOS_CONFIG", "config.yaml"))
-SUPPORTED_CONNECTION_VERSIONS = ("v1.3", "v1.2", "v1.1")
+
+# IS-04 Node API versions this wrapper can serve/advertise.
+SUPPORTED_NODE_API_VERSIONS = ("v1.3", "v1.2", "v1.1")
+
+# IS-05 Connection API versions this wrapper can serve/advertise.
+SUPPORTED_CONNECTION_API_VERSIONS = ("v1.1", "v1.0")
+
+# Backwards compatible alias (older code used this for Node API versions).
+SUPPORTED_CONNECTION_VERSIONS = SUPPORTED_NODE_API_VERSIONS
 
 
 class RegistryConfig(BaseModel):
@@ -26,7 +34,7 @@ class RegistryConfig(BaseModel):
         ),
     )
     static_urls: list[AnyHttpUrl] = Field(default_factory=list)
-    versions: list[str] = Field(default_factory=lambda: list(SUPPORTED_CONNECTION_VERSIONS))
+    versions: list[str] = Field(default_factory=lambda: list(SUPPORTED_NODE_API_VERSIONS))
     heartbeat_interval: float = Field(5.0, gt=0, description="Seconds between registration heartbeats")
     dns_sd_timeout: float = Field(3.0, gt=0, description="Seconds to wait for DNS-SD browse results")
 
@@ -72,7 +80,7 @@ def _default_registry_config() -> RegistryConfig:
     return RegistryConfig(
         mode="dns-sd",
         static_urls=[],
-        versions=list(SUPPORTED_CONNECTION_VERSIONS),
+        versions=list(SUPPORTED_NODE_API_VERSIONS),
         heartbeat_interval=5.0,
         dns_sd_timeout=3.0,
     )

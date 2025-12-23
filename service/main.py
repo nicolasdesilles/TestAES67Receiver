@@ -14,6 +14,7 @@ from service.audio.amixer_control import AmixerController
 from service.config import AppConfig, ensure_identity, load_config
 from service.daemon.aes67d_client import AES67DaemonClient
 from service.nmos.is04_registration import IS04RegistrationWorker
+from service.nmos.is04_node_api import build_node_api_router
 from service.nmos.is05_connection_api import build_router
 from service.storage.json_store import JsonStateStore
 
@@ -43,6 +44,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     amixer = AmixerController(config.audio.amixer_card, config.audio.amixer_controls)
 
     router = build_router(config, state_store, daemon_client, alsaloop, amixer)
+    node_router = build_node_api_router(config, identity, state_store, daemon_client)
     is04_worker = IS04RegistrationWorker(config, identity, state_store)
 
     async def daemon_monitor() -> None:
@@ -117,6 +119,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(router)
+    app.include_router(node_router)
 
     @app.get("/health/live")
     async def liveness() -> dict[str, Any]:
