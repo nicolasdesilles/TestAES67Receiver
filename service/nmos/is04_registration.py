@@ -245,8 +245,10 @@ class IS04RegistrationWorker:
         api_port = int(os.environ.get("AES67_NMOS_HTTP_PORT", str(self._config.http_port)))
         controls: list[Dict[str, Any]] = [
             {
-                "href": f"http://{api_host}:{api_port}/x-nmos/connection/{conn_version}",
+                # Include trailing '/' to be tolerant of clients that do naive string concatenation.
+                "href": f"http://{api_host}:{api_port}/x-nmos/connection/{conn_version}/",
                 "type": f"urn:x-nmos:control:sr-ctrl/{conn_version}",
+                "authorization": False,
             }
             for conn_version in SUPPORTED_CONNECTION_API_VERSIONS
         ]

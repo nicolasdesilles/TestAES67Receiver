@@ -152,8 +152,9 @@ def _build_device(config: AppConfig, identity: NodeIdentity) -> Dict[str, Any]:
     for conn_version in SUPPORTED_CONNECTION_API_VERSIONS:
         controls.append(
             {
-                "href": f"http://{api_host}:{api_port}/x-nmos/connection/{conn_version}",
+                "href": f"http://{api_host}:{api_port}/x-nmos/connection/{conn_version}/",
                 "type": f"urn:x-nmos:control:sr-ctrl/{conn_version}",
+                "authorization": False,
             }
         )
     return {
@@ -219,6 +220,7 @@ def build_node_api_router(
         except Exception:
             return get_clock()
 
+    @router.get("/x-nmos/node/{version}")
     @router.get("/x-nmos/node/{version}/")
     async def get_base(version: str = Depends(validate_version)) -> Any:
         if version not in SUPPORTED_NODE_API_VERSIONS:
