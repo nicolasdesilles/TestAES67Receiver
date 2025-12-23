@@ -42,6 +42,7 @@ class IS04RegistrationWorker:
         self._stop = asyncio.Event()
         self._registry: RegistryEndpoint | None = None
         self._registered = False
+        self._last_registered_at: float | None = None
 
     async def run(self) -> None:
         LOGGER.info("IS-04 worker started (%s)", self._config.describe_discovery())
@@ -68,9 +69,21 @@ class IS04RegistrationWorker:
                 return
             LOGGER.info("Using registry %s", self._registry.url)
             self._registered = False
+            self._last_registered_at = None
         if not self._registered:
             await self._register_resources()
             return
+
+        # Periodically refresh registrations to ensure any changed fields (e.g. Device.controls)
+        # are propagated to the registry even if the node stays up for a long time.
+        if self._last_registered_at is not None:
+            refresh_interval = float(self._config.registry.refresh_interval)
+            if refresh_interval > 0 and (time.monotonic() - self._last_registered_at) >= refresh_interval:
+                LOGGER.info("Refreshing IS-04 registrations (interval=%ss)", refresh_interval)
+                self._registered = False
+                await self._register_resources()
+                return
+
         await self._send_heartbeat()
 
     async def _discover_registry(self) -> RegistryEndpoint | None:
@@ -144,6 +157,7 @@ class IS04RegistrationWorker:
             LOGGER.warning("Failed to register resources: %s", exc)
             return
         self._registered = True
+        self._last_registered_at = time.monotonic()
         LOGGER.info(
             "Registered Node %s / Device %s / Receiver %s",
             self._identity.node_id,

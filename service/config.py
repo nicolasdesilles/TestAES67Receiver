@@ -37,6 +37,14 @@ class RegistryConfig(BaseModel):
     versions: list[str] = Field(default_factory=lambda: list(SUPPORTED_NODE_API_VERSIONS))
     heartbeat_interval: float = Field(5.0, gt=0, description="Seconds between registration heartbeats")
     dns_sd_timeout: float = Field(3.0, gt=0, description="Seconds to wait for DNS-SD browse results")
+    refresh_interval: float = Field(
+        60.0,
+        gt=0,
+        description=(
+            "Seconds between periodic re-registrations of Node/Device/Receiver resources. "
+            "This helps propagate changes (e.g. Device.controls) without requiring a restart."
+        ),
+    )
 
 
 _DEFAULT_DAEMON_URL = cast(AnyHttpUrl, "http://127.0.0.1:8080")
@@ -83,6 +91,7 @@ def _default_registry_config() -> RegistryConfig:
         versions=list(SUPPORTED_NODE_API_VERSIONS),
         heartbeat_interval=5.0,
         dns_sd_timeout=3.0,
+        refresh_interval=60.0,
     )
 
 
