@@ -154,6 +154,46 @@ def build_router(
     def _stable_receiver_id() -> str:
         return store.get_or_create_uuid("receiver_id")
 
+    async def _apply_activation_from_staged() -> bool:
+        """Apply the currently staged state to the underlying system.
+
+        Returns whether the sink is active after applying.
+        """
+
+        state = await controller.snapshot()
+        staged = state.staged
+
+        if not staged.master_enable:
+            LOGGER.info("Deactivating receiver (master_enable=false): deleting sink and stopping alsaloop")
+            await daemon_client.delete_sink()
+            await alsaloop.stop()
+            await controller.commit_activation(False)
+            return False
+
+        params = staged.transport_params[0]
+        LOGGER.info(
+            "Activating receiver: enable=%s dest=%s:%s encoding=%s/%s",
+            staged.master_enable,
+            params.destination_ip,
+            params.destination_port,
+            params.encoding_name,
+            params.sample_rate,
+        )
+        sdp = SDPBuilder.build(params, config.node_friendly_name)
+        payload = {
+            "use_sdp": True,
+            "sdp": sdp,
+            "map": [0, 0],  # duplicate mono channel on both playback legs
+            "delay": 0,
+        }
+        LOGGER.info("Applying sink payload to aes67-linux-daemon (sink=%s)", daemon_client.sink_id)
+        await daemon_client.upsert_sink(payload)
+        await alsaloop.ensure_running()
+        await amixer.set_volume(staged.audio.volume)
+        await amixer.set_mute(staged.audio.mute)
+        await controller.commit_activation(True)
+        return True
+
     async def validate_version(version: str = Path(..., description="IS-05 version")) -> str:
         if version not in SUPPORTED_CONNECTION_API_VERSIONS:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unsupported IS-05 version")
@@ -231,8 +271,41 @@ def build_router(
 
     @router.post("/x-nmos/connection/{version}/bulk/receivers")
     @router.post("/x-nmos/connection/{version}/bulk/receivers/")
-    async def bulk_receivers_post(version: str = Depends(validate_version)) -> JSONResponse:
-        return _error_response(status.HTTP_501_NOT_IMPLEMENTED, "Bulk receiver control is not implemented")
+    async def bulk_receivers_post(
+        payload: list[Dict[str, Any]] = Body(...),
+        version: str = Depends(validate_version),
+    ) -> list[Dict[str, Any]]:
+        """Bulk interface, implemented for a single receiver.
+
+        Many controllers (and some registry UIs) use the bulk endpoint even for
+        single-device operations.
+        """
+
+        receiver_id = _stable_receiver_id()
+        results: list[Dict[str, Any]] = []
+
+        for item in payload:
+            target_id = str(item.get("id", ""))
+            params = item.get("params")
+            if target_id != receiver_id:
+                results.append({"id": target_id, "code": 404, "error": "Receiver not found", "debug": None})
+                continue
+            if not isinstance(params, dict):
+                results.append({"id": target_id, "code": 400, "error": "Invalid params", "debug": None})
+                continue
+
+            try:
+                # Stage the requested params.
+                await controller.update_staged(params)
+                # Apply activation if requested (or master_enable=false to disconnect).
+                await _apply_activation_from_staged()
+                results.append({"id": target_id, "code": 200})
+            except HTTPException as exc:
+                results.append({"id": target_id, "code": int(exc.status_code), "error": str(exc.detail), "debug": None})
+            except Exception as exc:  # pragma: no cover
+                results.append({"id": target_id, "code": 500, "error": "Internal error", "debug": str(exc)})
+
+        return results
 
     @router.get("/x-nmos/connection/{version}/single/receivers/{receiver_id}/transporttype")
     async def get_transport_type(
@@ -246,38 +319,8 @@ def build_router(
         version: str = Depends(validate_version),
         receiver_id: str = Depends(ensure_receiver),
     ) -> Dict[str, Any]:
-        return {
-            "sample_rates": [48000],
-            "channels": [1],
-            "encodings": ["L24"],
-            "destination_modes": ["multicast", "unicast"],
-        }
-
-    @router.get("/x-nmos/connection/{version}/single/receivers/{receiver_id}/staged")
-    async def get_staged(
-        version: str = Depends(validate_version),
-        receiver_id: str = Depends(ensure_receiver),
-    ) -> Dict[str, Any]:
-        state = await controller.snapshot()
-        return state.staged.model_dump()
-
-    @router.patch("/x-nmos/connection/{version}/single/receivers/{receiver_id}/staged")
-    async def patch_staged(
-        payload: Dict[str, Any] = Body(...),
-        version: str = Depends(validate_version),
-        receiver_id: str = Depends(ensure_receiver),
-    ) -> Dict[str, Any]:
-        state = await controller.update_staged(payload)
-        return state.staged.model_dump()
-
-    @router.get("/x-nmos/connection/{version}/single/receivers/{receiver_id}/active")
-    async def get_active(
-        version: str = Depends(validate_version),
-        receiver_id: str = Depends(ensure_receiver),
-    ) -> Dict[str, Any]:
-        state = await controller.snapshot()
-        return state.active.model_dump()
-
+        active = await _apply_activation_from_staged()
+        return {"state": "connected" if active else "disconnected"}
     @router.post(
         "/x-nmos/connection/{version}/single/receivers/{receiver_id}/staged/activation",
         status_code=status.HTTP_202_ACCEPTED,
